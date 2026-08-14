@@ -367,9 +367,10 @@ process.exitCode = await runCli(process.argv.slice(2));
 
 ## Task 2 — Canonical JSON (RFC 8785 subset) and digests
 
-**Status:** In Progress (Failed Verify Cycles: 1)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 2 implementation -> verifier FAIL (undefined object properties, sparse array, trailing LF)
+- attempt 2: filter undefined object properties, use Array.from with null fallback for sparse array/undefined elements, ensure single trailing LF -> verifier PASS
 
 **Goal:** one deterministic byte representation for everything that gets hashed or signed.
 **Difficulty:** EASY · *parallelizable with task 3*
@@ -473,6 +474,8 @@ export function digestBytes(data: Uint8Array): string {
 ---
 
 ## Task 3 — `capsule.json` v0.1 schema and manifest loader
+
+**Status:** Completed (PASS)
 
 **Goal:** the normative manifest contract, validated with JSON Schema 2020-12.
 **Difficulty:** HARD (this schema is the protocol; every later task depends on its shape)
@@ -707,6 +710,10 @@ export function newValidator(): Ajv2020Type {
 ---
 
 ## Task 4 — Deterministic ZIP container (write + read)
+
+**Status:** In Progress (Failed Verify Cycles: 1)
+**Attempt Ledger:**
+- attempt 1: initial Task 4 implementation -> verifier FAIL (`.` path segment, central directory uncounted entry bypass, 256-char test coverage)
 
 **Goal:** byte-reproducible `.capsule` containers that `unzip`/7-Zip can still open.
 **Difficulty:** HARD (path traversal + zip-bomb guards live here; everything downstream trusts it)

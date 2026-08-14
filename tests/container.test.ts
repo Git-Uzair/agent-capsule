@@ -75,6 +75,24 @@ test("rejects illegal paths at pack time", async () => {
   );
 });
 
+test("rejects `.` as a path segment", async () => {
+  // Extractors normalize `.` away (Expand-Archive turns `src/./a.js` into `src\a.js`), so a
+  // container may hold two entries this reader calls distinct that collide on extraction.
+  for (const path of ["src/./a.js", "src/.", "data/x/.", ".capsule/./key"]) {
+    await assert.rejects(() => packEntries([{ path, data: enc("x") }]), containerError(/illegal entry path/));
+  }
+});
+
+test("rejects a legal-looking path longer than 256 characters", async () => {
+  const over = `src/${"a".repeat(255)}.js`; // every character and segment legal, only too long
+  assert.equal(over.length, 262);
+  await assert.rejects(() => packEntries([{ path: over, data: enc("x") }]), containerError(/illegal entry path/));
+  const atLimit = `src/${"a".repeat(249)}.js`; // 256 exactly: the limit is inclusive
+  assert.equal(atLimit.length, 256);
+  const r = await openContainer(await packEntries([{ path: atLimit, data: enc("x") }]));
+  assert.equal(r.has(atLimit), true);
+});
+
 test("rejects zip bombs at pack time", async () => {
   const big = Buffer.alloc(32 * 1024 * 1024 + 1);
   await assert.rejects(
@@ -148,4 +166,22 @@ test("rejects a container that declares one path twice", async () => {
   const bytes = await collect(zip);
   assert.equal((await centralDirectory(bytes)).length, 2, "fixture must really carry two records");
   await assert.rejects(() => openContainer(bytes), containerError(/duplicate entry: capsule\.json/));
+});
+
+test("rejects a container hiding central directory records behind the declared entry count", async () => {
+  const zip = new ZipFile();
+  zip.addBuffer(Buffer.from("FIRST"), "capsule.json", { compress: false });
+  zip.addBuffer(Buffer.from("HIDDEN"), "data/xx.bin", { compress: false });
+  // yazl refuses to write `..` itself, so smuggle the traversal in after the fact.
+  const bytes = replaceAllBytes(await collect(zip), "data/xx.bin", "../../ev.js");
+  const eocd = bytes.length - 22; // yazl writes no archive comment
+  assert.equal(bytes.readUInt32LE(eocd), 0x06054b50, "fixture must end with the EOCD record");
+  const declared = bytes.readUInt32LE(eocd + 12);
+  bytes.writeUInt16LE(1, eocd + 8);
+  bytes.writeUInt16LE(1, eocd + 10);
+  // The directory still spans both records, so a reader that walks it by its declared size
+  // (python's zipfile does) sees `../../ev.js`, while yauzl believes the count and stops at one.
+  assert.equal((await centralDirectory(bytes)).length, 1, "fixture must declare only one entry");
+  assert.ok(declared > 46 + "capsule.json".length, "declared size must still cover the hidden record");
+  await assert.rejects(() => openContainer(bytes), containerError(/central directory/));
 });

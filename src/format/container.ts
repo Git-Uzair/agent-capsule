@@ -38,11 +38,15 @@ function fail(message: string, detail: Record<string, unknown> = {}): never {
 
 /**
  * The one gate on entry names: an allowlist of the four capsule directories plus the manifest.
- * Absolute paths, backslashes, empty segments and `..` all fall out of the pattern; the explicit
- * `..` check is belt and braces for the day the pattern is loosened.
+ * Absolute paths, backslashes and empty segments all fall out of the pattern, but the character
+ * class matches `.` and `..` as whole segments, so both are rejected by name. `..` is traversal;
+ * `.` is worse than it looks — extractors normalise it away (`Expand-Archive` writes `src/./a.js`
+ * to `src\a.js`), so allowing it lets one container hold two entries this reader calls distinct
+ * that unpack over each other.
  */
 export function assertLegalPath(path: string): void {
-  if (path.length > MAX_PATH || !LEGAL.test(path) || path.split("/").includes("..")) {
+  const dotted = (segment: string): boolean => segment === "." || segment === "..";
+  if (path.length > MAX_PATH || !LEGAL.test(path) || path.split("/").some(dotted)) {
     fail(`illegal entry path: ${path}`, { path });
   }
 }
@@ -96,8 +100,30 @@ export async function openContainer(bytes: Buffer): Promise<CapsuleReader> {
   };
 }
 
+/**
+ * yauzl enumerates exactly as many central directory records as the EOCD's count field claims, so
+ * records past that count never reach the gates below — while an extractor that walks the
+ * directory by its declared *size* (python's `zipfile` does) reads them as ordinary files. Reading
+ * the declared size back out lets the reader prove every directory byte belongs to a record it
+ * checked. Same backwards scan yauzl does (yauzl/index.js:154): the last signature in the file
+ * wins, and yauzl has already rejected the buffer if the comment length disagreed with it.
+ *
+ * A zip64 container keeps its real size in the zip64 EOCD and leaves 0xffffffff here, so it fails
+ * this check; nothing inside the 4096-entry / 64 MiB limits needs zip64 to begin with.
+ */
+function declaredCentralDirectorySize(bytes: Buffer): number {
+  const floor = Math.max(0, bytes.length - (0xffff + 42));
+  for (let at = bytes.length - 22; at >= floor; at--) {
+    if (bytes.readUInt32LE(at) === 0x06054b50) return bytes.readUInt32LE(at + 12);
+  }
+  fail("unreadable container: no end of central directory record");
+}
+
 function readAll(bytes: Buffer): Promise<Map<string, Buffer>> {
   return new Promise((resolve, reject) => {
+    // Read up front: a throw in the executor rejects the promise, while a throw from inside a
+    // yauzl callback would escape as an uncaught exception.
+    const declaredDirectoryBytes = declaredCentralDirectorySize(bytes);
     // `validateEntrySizes` makes yauzl abort a stream that does not match its declared
     // uncompressed size, which is what stops a lying central directory from smuggling a bomb
     // past the size checks below. DEFLATE stays readable so third-party capsules load.
@@ -107,6 +133,7 @@ function readAll(bytes: Buffer): Promise<Map<string, Buffer>> {
       }
       const files = new Map<string, Buffer>();
       let total = 0;
+      let directoryBytes = 0;
       let settled = false;
       const abort = (cause: unknown): void => {
         if (settled) return;
@@ -124,6 +151,8 @@ function readAll(bytes: Buffer): Promise<Map<string, Buffer>> {
 
       zip.on("entry", (entry: Entry) => {
         if (settled) return;
+        // Record sizes are 46 bytes of fixed header plus the three variable fields (APPNOTE 4.3.12).
+        directoryBytes += 46 + entry.fileNameLength + entry.extraFieldLength + entry.fileCommentLength;
         if (entry.fileName.endsWith("/")) return zip.readEntry(); // directory record, no data
         try {
           assertLegalPath(entry.fileName);
@@ -159,6 +188,13 @@ function readAll(bytes: Buffer): Promise<Map<string, Buffer>> {
       });
       zip.on("end", () => {
         if (settled) return;
+        const declared = declaredDirectoryBytes;
+        if (directoryBytes !== declared) {
+          return abortWith(
+            `central directory not fully accounted for: read ${directoryBytes} of ${declared} bytes`,
+            { read: directoryBytes, declared },
+          );
+        }
         settled = true;
         resolve(files);
       });
