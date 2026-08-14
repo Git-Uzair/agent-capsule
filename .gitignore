@@ -1,0 +1,7 @@
+node_modules/
+.tmp/
+*.capsule
+*.sqlite
+*.sqlite-*
+traces/
+*.tsbuildinfo
