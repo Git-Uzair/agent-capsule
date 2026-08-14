@@ -9,15 +9,31 @@ test("sorts object keys by code unit and drops whitespace", () => {
   assert.equal(canonicalize({ "\u00e4": 1, z: 2 }), '{"z":2,"ä":1}');
 });
 
-test("preserves array order and serialises numbers per ES6", () => {
+test("drops undefined properties inside objects", () => {
+  assert.equal(canonicalize({ x: undefined }), "{}");
+  assert.equal(canonicalize({ a: { b: undefined } }), '{"a":{}}');
+  assert.equal(canonicalize({ b: 1, c: undefined, a: 2 }), '{"a":2,"b":1}');
+});
+
+test("preserves array order, handles sparse arrays and serialises numbers per ES6", () => {
   assert.equal(canonicalize([3, 1, 2]), "[3,1,2]");
+  assert.equal(canonicalize([, 1]), "[null,1]");
+  assert.equal(canonicalize([undefined, 1]), "[null,1]");
   assert.equal(canonicalize({ n: 1.5, e: 1e21, z: -0 }), '{"e":1e+21,"n":1.5,"z":0}');
 });
 
 test("rejects values with no canonical form", () => {
-  for (const bad of [NaN, Infinity, undefined, () => 1, 1n]) {
+  assert.throws(
+    () => canonicalize(undefined),
+    (e: unknown) => e instanceof CapsuleError && e.code === "E_DIGEST",
+  );
+  for (const bad of [NaN, Infinity, () => 1, 1n, Symbol("foo")]) {
     assert.throws(
       () => canonicalize({ x: bad } as never),
+      (e: unknown) => e instanceof CapsuleError && e.code === "E_DIGEST",
+    );
+    assert.throws(
+      () => canonicalize(bad as never),
       (e: unknown) => e instanceof CapsuleError && e.code === "E_DIGEST",
     );
   }
@@ -32,4 +48,3 @@ test("digests are stable and prefixed", () => {
 test("digestBytes hashes Uint8Array", () => {
   assert.equal(digestBytes(new TextEncoder().encode("abc")), `sha256:${sha256Hex("abc")}`);
 });
-

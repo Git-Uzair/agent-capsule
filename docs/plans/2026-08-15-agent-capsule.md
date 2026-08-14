@@ -367,6 +367,10 @@ process.exitCode = await runCli(process.argv.slice(2));
 
 ## Task 2 — Canonical JSON (RFC 8785 subset) and digests
 
+**Status:** In Progress (Failed Verify Cycles: 1)
+**Attempt Ledger:**
+- attempt 1: initial Task 2 implementation -> verifier FAIL (undefined object properties, sparse array, trailing LF)
+
 **Goal:** one deterministic byte representation for everything that gets hashed or signed.
 **Difficulty:** EASY · *parallelizable with task 3*
 **Files (new):** `src/core/canonical.ts`, `src/core/digest.ts`, `tests/canonical.test.ts`
