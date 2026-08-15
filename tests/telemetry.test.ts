@@ -332,6 +332,90 @@ test("journal.run(runId) queries capsule_runs table directly and exportTrace ret
   });
 });
 
+test("non-integer effect duration ms exports integer nano timestamps without throwing", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const paths = sidecarPaths(capsule.file);
+    const runId = randomUUID();
+
+    const journal = openJournal(paths.journal);
+    try {
+      journal.beginRun({
+        runId,
+        capsuleId: capsule.capsuleId,
+        tool: "greet",
+        startedAt: "2026-08-15T12:34:56.789Z",
+      });
+      journal.append(runId, EVENT.runStarted, { capsuleId: capsule.capsuleId, tool: "greet" });
+      journal.append(runId, EVENT.effectCompleted, {
+        i: 0,
+        op: "kv.set",
+        paramsDigest: "sha256:aa",
+        ms: 15.5,
+      });
+      journal.append(runId, EVENT.toolCompleted, { tool: "greet" });
+      journal.append(runId, EVENT.runFinished, { status: "ok" });
+      journal.finishRun(runId, "ok");
+
+      const trace = exportTrace({ journal, runId });
+      const spans = trace.resourceSpans[0]!.scopeSpans[0]!.spans;
+      const childSpan = spans[1]!;
+
+      assert.match(childSpan.startTimeUnixNano, /^\d+$/);
+      assert.match(childSpan.endTimeUnixNano, /^\d+$/);
+      assert.equal(
+        BigInt(childSpan.endTimeUnixNano) - BigInt(childSpan.startTimeUnixNano),
+        16n * 1_000_000n,
+      );
+
+      const durationAttr = childSpan.attributes.find(
+        (a: { key: string }) => a.key === ATTR.CAPSULE_EFFECT_DURATION_MS,
+      );
+      assert.equal(durationAttr?.value.intValue, 16);
+      assert.match(trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.endTimeUnixNano, /^\d+$/);
+    } finally {
+      journal.close();
+    }
+  });
+});
+
+test("effect.completed events sharing an ordinal still produce distinct child spanIds", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const paths = sidecarPaths(capsule.file);
+    const runId = randomUUID();
+
+    const journal = openJournal(paths.journal);
+    try {
+      journal.beginRun({
+        runId,
+        capsuleId: capsule.capsuleId,
+        tool: "greet",
+        startedAt: "2026-08-15T12:34:56.789Z",
+      });
+      journal.append(runId, EVENT.runStarted, { capsuleId: capsule.capsuleId, tool: "greet" });
+      journal.append(runId, EVENT.effectCompleted, { i: 0, op: "kv.set", paramsDigest: "sha256:aa", ms: 1 });
+      journal.append(runId, EVENT.effectCompleted, { i: 0, op: "kv.get", paramsDigest: "sha256:bb", ms: 2 });
+      journal.append(runId, EVENT.toolCompleted, { tool: "greet" });
+      journal.append(runId, EVENT.runFinished, { status: "ok" });
+      journal.finishRun(runId, "ok");
+
+      const trace = exportTrace({ journal, runId });
+      const spans = trace.resourceSpans[0]!.scopeSpans[0]!.spans;
+      const childSpans = spans.slice(1);
+      assert.equal(childSpans.length, 2);
+
+      const spanIds = new Set(childSpans.map((s: OTelSpan) => s.spanId));
+      assert.equal(spanIds.size, 2, "child spanIds must be unique");
+      for (const child of childSpans) {
+        assert.notEqual(child.spanId, spans[0]!.spanId);
+      }
+    } finally {
+      journal.close();
+    }
+  });
+});
+
 test("startSpan, endSpan, and writeTrace helpers operate correctly", async () => {
   const draft = startSpan({
     name: "test_span",

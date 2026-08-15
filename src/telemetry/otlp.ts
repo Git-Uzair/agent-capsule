@@ -196,15 +196,19 @@ export function exportTrace(opts: {
     if (!effectEvent) continue;
     const payload = effectEvent.payload as RecordedEffect;
     const ordinal = payload.i ?? idx;
-    const childSpanId = sha256Hex(`${opts.runId}:effect:${ordinal}`).slice(0, 16);
-    const durationMs = typeof payload.ms === "number" && payload.ms >= 0 ? payload.ms : 1;
-    const durationNano = BigInt(Math.max(1, durationMs)) * 1_000_000n;
+    const opStr = String(payload.op ?? "unknown");
+    // spanId keys off the array index, not the payload ordinal: ordinals come from the
+    // journal and are not guaranteed unique, index always is.
+    const childSpanId = sha256Hex(`${opts.runId}:effect:${idx}`).slice(0, 16);
+    const safeMs =
+      typeof payload.ms === "number" && Number.isFinite(payload.ms) && payload.ms >= 0 ? Math.round(payload.ms) : 1;
+    const durationNano = BigInt(Math.max(1, safeMs)) * 1_000_000n;
     const spanStartNano = currentNano;
     const spanEndNano = currentNano + durationNano;
     currentNano = spanEndNano;
 
     const childAttributes: OTelAttribute[] = [
-      { key: ATTR.CAPSULE_EFFECT_OP, value: { stringValue: payload.op } },
+      { key: ATTR.CAPSULE_EFFECT_OP, value: { stringValue: opStr } },
       { key: ATTR.CAPSULE_EFFECT_PARAMS_DIGEST, value: { stringValue: payload.paramsDigest } },
       { key: ATTR.CAPSULE_EFFECT_ORDINAL, value: { intValue: ordinal } },
     ];
@@ -212,16 +216,16 @@ export function exportTrace(opts: {
       childAttributes.push({ key: ATTR.CAPSULE_EFFECT_VALUE_DIGEST, value: { stringValue: payload.valueDigest } });
     }
     if (payload.ms !== undefined) {
-      childAttributes.push({ key: ATTR.CAPSULE_EFFECT_DURATION_MS, value: { intValue: payload.ms } });
+      childAttributes.push({ key: ATTR.CAPSULE_EFFECT_DURATION_MS, value: { intValue: safeMs } });
     }
 
-    const childKind = payload.op === "net.fetch" ? SPAN_KIND.CLIENT : SPAN_KIND.INTERNAL;
+    const childKind = opStr === "net.fetch" ? SPAN_KIND.CLIENT : SPAN_KIND.INTERNAL;
 
     childSpans.push({
       traceId,
       spanId: childSpanId,
       parentSpanId: rootSpanId,
-      name: `capsule.effect ${payload.op}`,
+      name: `capsule.effect ${opStr}`,
       kind: childKind,
       startTimeUnixNano: spanStartNano.toString(),
       endTimeUnixNano: spanEndNano.toString(),
