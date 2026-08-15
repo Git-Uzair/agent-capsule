@@ -106,7 +106,15 @@ function parsePayload(json: string, idx: number): unknown {
 export function openJournal(path: string): Journal {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec(SCHEMA);
+  // The path is the caller's, so the file it names may not be a database at all. SQLite says so on
+  // the first statement, by which time the handle is open: it is closed here rather than left to
+  // hold a lock on a file the caller is about to be told is unusable.
+  try {
+    db.exec(SCHEMA);
+  } catch (e) {
+    db.close();
+    throw e;
+  }
 
   const insertRun = db.prepare(
     "INSERT INTO capsule_runs (run_id, capsule_id, tool, mode, status, started_at) VALUES (?, ?, ?, ?, 'running', ?)",

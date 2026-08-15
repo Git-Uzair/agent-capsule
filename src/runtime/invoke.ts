@@ -8,7 +8,7 @@ import type { GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
 import { createEffects, type EffectsController } from "./effects.ts";
 import { runGuest } from "./guest.ts";
-import { EVENT, openJournal } from "./journal.ts";
+import { EVENT, openJournal, type Journal } from "./journal.ts";
 import { buildPolicy, type Policy } from "./policy.ts";
 import { openState, type CapsuleState } from "./state.ts";
 
@@ -97,6 +97,21 @@ function sanitizeValue(value: unknown): unknown {
 }
 
 /**
+ * Opens one of the two sidecar databases. Both paths can come from the caller — `--journal`, `--state`
+ * — and a path is not a promise that the file behind it is a database: a text file, a half-written
+ * download or somebody else's SQLite file all fail on open. That is the caller's input being wrong,
+ * so it is `E_USAGE` in this vocabulary rather than SQLite's error reaching the user as a stack trace.
+ */
+function openSidecar<T>(which: "journal" | "state", open: () => T): T {
+  try {
+    return open();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new CapsuleError("E_USAGE", `unusable ${which} database: ${message}`, { which });
+  }
+}
+
+/**
  * The one path from "call this tool" to "here is what it returned". Every entry point — the CLI, MCP,
  * the UI bridge — goes through it, so the order below is the product's security model in one place:
  * the tool has to exist, the arguments have to fit the schema the author published, and the user has
@@ -106,7 +121,8 @@ function sanitizeValue(value: unknown): unknown {
  * Past that point the run is a matter of record: it is opened in the journal, every effect the guest
  * asks for is appended as it happens, and the outcome — value or error — closes the chain. Opening it
  * is itself a refusal point: a run id already in the journal is the caller's mistake, and the run
- * holding that id is left exactly as it was. Nothing throws out of here. A caller gets an
+ * holding that id is left exactly as it was. So is opening the databases at all, which is why they are
+ * opened inside the same `try` as everything else. Nothing throws out of here. A caller gets an
  * `InvokeResult` either way, because "the tool failed" is an answer a model and a CLI both have to be
  * able to read.
  */
@@ -154,7 +170,7 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
   }
 
   const paths = sidecarPaths(capsule.file);
-  const journal = openJournal(opts.journalPath ?? paths.journal);
+  let journal: Journal | undefined;
   let state: CapsuleState | undefined;
   let effects: EffectsController | undefined;
   // Whether this call owns a run in the journal. A run id it did not open is a run it must not write
@@ -170,8 +186,8 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     let events = 0;
     let broken: InvokeError | undefined;
     try {
-      journal.verifyChain(runId);
-      events = journal.events(runId).length;
+      journal?.verifyChain(runId);
+      events = journal?.events(runId).length ?? 0;
     } catch (e) {
       broken = errorOf(e);
     }
@@ -188,7 +204,8 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
   };
 
   try {
-    state = openState(opts.statePath ?? paths.app);
+    journal = openSidecar("journal", () => openJournal(opts.journalPath ?? paths.journal));
+    state = openSidecar("state", () => openState(opts.statePath ?? paths.app));
     const argsDigest = digestOf(args);
     // The run id is the journal's primary key, so the insert is the existence check: a caller that
     // reuses an id is refused here, before anything is written or executed, and told so in its own
@@ -259,19 +276,22 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     // ending anyway would append to whatever run already holds the id and mark it failed. And the
     // journal is not allowed to replace the error: if writing the ending fails, the caller still
     // hears why the tool did.
+    // `started` is only ever set once this call has a journal and a run of its own, so the optional
+    // calls below are for the type checker's benefit rather than a case that happens.
     if (!started) return refused(error);
     try {
-      journal.append(runId, EVENT.toolCompleted, { tool: tool.name, error });
-      journal.append(runId, EVENT.runFinished, { status: "error", code: error.code });
-      journal.finishRun(runId, "error");
+      journal?.append(runId, EVENT.toolCompleted, { tool: tool.name, error });
+      journal?.append(runId, EVENT.runFinished, { status: "error", code: error.code });
+      journal?.finishRun(runId, "error");
     } catch {
       /* the chain check in settle() is what reports a journal that could not be closed properly */
     }
     return settle(false, undefined, error);
   } finally {
-    // Both databases, whatever happened: an unclosed SQLite handle keeps a file locked on Windows and
-    // leaks a handle everywhere else.
+    // Both databases, whatever happened — and either may never have opened, since opening them is one
+    // of the things that can fail. An unclosed SQLite handle keeps a file locked on Windows and leaks
+    // a handle everywhere else.
     state?.close();
-    journal.close();
+    journal?.close();
   }
 }

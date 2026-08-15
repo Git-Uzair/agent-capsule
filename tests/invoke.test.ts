@@ -390,6 +390,70 @@ test("a duplicate runId is refused and the run already under that id is left alo
   });
 });
 
+test("a journal path that is not a database is refused before the run starts", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const journalPath = join(home, "corrupt-journal.sqlite");
+    writeFileSync(journalPath, "this is not a sqlite database");
+    const result = await invokeTool({ capsule, tool: "greet", args: { name: "ada" }, journalPath, clock: () => AT });
+
+    // A sidecar the caller named is the caller's input, so an unreadable one is a refusal with a
+    // code — not an exception escaping the one function that promises never to throw.
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "E_USAGE");
+    assert.match(result.error?.message ?? "", /unusable journal database/);
+    assert.equal(result.events, 0);
+    assert.equal(result.effects, 0);
+  });
+});
+
+test("a state path that is not a database is refused and journals nothing", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const statePath = join(home, "corrupt-state.sqlite");
+    writeFileSync(statePath, "this is not a sqlite database");
+    const journalPath = join(home, "state-fail.sqlite");
+    const result = await invokeTool({
+      capsule,
+      tool: "greet",
+      args: { name: "ada" },
+      statePath,
+      journalPath,
+      clock: () => AT,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "E_USAGE");
+    assert.match(result.error?.message ?? "", /unusable state database/);
+    assert.equal(result.events, 0);
+    assert.equal(result.effects, 0);
+
+    const journal = openJournal(journalPath);
+    assert.equal(journal.latestRunId(), null);
+    journal.close();
+  });
+});
+
+test("cli run reports a corrupt sidecar as a coded failure rather than a stack trace", async () => {
+  await withHome(async (home) => {
+    const file = join(home, "hello.capsule");
+    await packDirectory(FIXTURE, file, { homeDir: home });
+    const corrupt = join(home, "corrupt.sqlite");
+    writeFileSync(corrupt, "this is not a sqlite database");
+
+    for (const flag of ["--journal", "--state"]) {
+      const result = runCli([file, "--tool", "greet", "--args", '{"name":"ada"}', flag, corrupt], home);
+
+      assert.equal(result.status, 1);
+      // Which stream carries the report is the CLI's business; what matters is that the user is told
+      // the code and is not shown host stack frames.
+      const output = result.stdout + result.stderr;
+      assert.match(output, /E_USAGE: unusable (journal|state) database/);
+      assert.doesNotMatch(output, /^\s+at /m);
+    }
+  });
+});
+
 test("cli run exits 0 with a value and 1 on a failure", async () => {
   await withHome(async (home) => {
     const file = join(home, "hello.capsule");

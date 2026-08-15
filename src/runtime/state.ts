@@ -91,9 +91,18 @@ function rowBytes(row: unknown): number {
 export function openState(appDbPath: string): CapsuleState {
   mkdirSync(dirname(appDbPath), { recursive: true });
   const db = new DatabaseSync(appDbPath);
-  db.exec(SCHEMA);
-  // The read-only handle is opened after the schema exists: SQLite will not create a file for it.
-  const roDb = new DatabaseSync(appDbPath, { readOnly: true });
+  // The path is the caller's, so the file it names may not be a database at all, and SQLite only says
+  // so on the first statement — with the handle already open. Whatever fails here, no handle is left
+  // holding a lock on a file the caller is about to be told is unusable.
+  let roDb: DatabaseSync;
+  try {
+    db.exec(SCHEMA);
+    // The read-only handle is opened after the schema exists: SQLite will not create a file for it.
+    roDb = new DatabaseSync(appDbPath, { readOnly: true });
+  } catch (e) {
+    db.close();
+    throw e;
+  }
 
   const selectValue = db.prepare("SELECT v FROM kv WHERE k = ?");
   const upsert = db.prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v");
