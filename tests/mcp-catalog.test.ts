@@ -447,6 +447,81 @@ test("tools/list cleans schema prose and serves literally matched slots verbatim
   });
 });
 
+test("tools/list serves a tool whose property is named after a literally matched keyword", async () => {
+  // A name is only a keyword where a keyword is expected. Inside `properties` or `$defs` the key is
+  // a *name*, so a property called `pattern`, `enum`, `required` or `const` carries an ordinary
+  // subschema whose prose is cleaned like any other — screening it as unrewritable identifier text
+  // would suppress a tool that has nothing hidden in it.
+  const cases: [string, Record<string, unknown>, (schema: Record<string, unknown>) => void][] = [
+    [
+      "property named pattern",
+      {
+        type: "object",
+        properties: { pattern: { type: "string", description: "A regex to match " } },
+      },
+      (schema) => {
+        const property = record(record(schema["properties"])["pattern"]);
+        assert.equal(property["description"], "A regex to match");
+      },
+    ],
+    [
+      "property named enum",
+      {
+        type: "object",
+        properties: { enum: { type: "string", description: "the \u001b[1mvalue\u001b[0m to send" } },
+      },
+      (schema) => {
+        const property = record(record(schema["properties"])["enum"]);
+        assert.equal(property["description"], "the value to send");
+      },
+    ],
+    [
+      "property named required",
+      {
+        type: "object",
+        properties: { required: { type: "boolean", description: "\u001b[31mmust\u001b[0m be set" } },
+      },
+      (schema) => {
+        const property = record(record(schema["properties"])["required"]);
+        assert.equal(property["description"], "must be set");
+      },
+    ],
+    [
+      "$defs entry named const",
+      {
+        type: "object",
+        properties: {},
+        $defs: { const: { type: "string", title: "Ki\u200bnd" } },
+      },
+      (schema) => {
+        const definition = record(record(schema["$defs"])["const"]);
+        assert.equal(definition["title"], "Kind");
+      },
+    ],
+  ];
+
+  for (const [label, inputSchema, check] of cases) {
+    await withHome(async (home) => {
+      const capsule = await packCapsule(home, (draft) => {
+        (draft.tools[0] as DraftTool).inputSchema = inputSchema;
+      });
+
+      const warnings: string[] = [];
+      const tools = toolsOf(
+        await callOk(createMcpServer({ capsule, warn: (l) => warnings.push(l) }), "tools/list"),
+      );
+
+      assert.deepEqual(
+        tools.map((t) => t.name),
+        ["greet"],
+        label,
+      );
+      assert.deepEqual(warnings, [], label);
+      check((tools[0] as ListedTool).inputSchema);
+    });
+  }
+});
+
 test("startup refuses on a homoglyph tool-name collision", async () => {
   await withHome(async (home) => {
     // `Greet` and `greet` are two distinct names by the manifest's rules and one name to a reader:

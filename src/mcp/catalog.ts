@@ -66,10 +66,17 @@ const SCHEMA_MAPS = new Set(["properties", "patternProperties", "$defs", "defini
  *
  * The offending identifier is deliberately not reported: it holds the escape sequences this exists to
  * catch, and the warning is written to somebody's terminal.
+ *
+ * `keysAreNames` means the same here as in `sanitizeSchemaProse`, and for the same reason: a keyword is
+ * only a keyword in keyword position. Inside a `SCHEMA_MAPS` value the key is a property name and its
+ * value is an ordinary subschema, so a property called `enum` is screened as a name and then walked as
+ * a subschema — not read as a literally matched slot whose prose can never be cleaned. The two
+ * functions have to agree on that, or a schema this one refuses is a schema the other would have
+ * served cleanly.
  */
-function hasUnsafeIdentifier(value: unknown): boolean {
+function hasUnsafeIdentifier(value: unknown, keysAreNames = false): boolean {
   if (Array.isArray(value)) {
-    return value.some(hasUnsafeIdentifier);
+    return value.some((item) => hasUnsafeIdentifier(item));
   }
   const record = asRecord(value);
   if (record === undefined) {
@@ -79,9 +86,11 @@ function hasUnsafeIdentifier(value: unknown): boolean {
     if (key !== sanitizeModelText(key)) {
       return true;
     }
-    const unsafe = LITERAL_KEYWORDS.has(key)
+    // Every string under a literally matched keyword is served verbatim — a `const` may be a whole
+    // object — so all of its leaves are identifiers, not just the top-level string or array items.
+    const unsafe = !keysAreNames && LITERAL_KEYWORDS.has(key)
       ? stringLeaves(v).some((leaf) => leaf !== sanitizeModelText(leaf))
-      : hasUnsafeIdentifier(v);
+      : hasUnsafeIdentifier(v, !keysAreNames && SCHEMA_MAPS.has(key));
     if (unsafe) {
       return true;
     }
