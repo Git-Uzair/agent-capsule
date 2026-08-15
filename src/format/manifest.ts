@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { SchemaObject } from "ajv/dist/2020.js";
+import SCHEMA_JSON from "../../schema/capsule-0.1.schema.json" with { type: "json" };
 import { CapsuleError } from "../core/errors.ts";
 import { newValidator } from "../core/schema.ts";
 import { hostAllowed, hostOf } from "../runtime/policy.ts";
@@ -73,8 +72,7 @@ export type Manifest = {
   ui?: ManifestUi;
 };
 
-const SCHEMA_PATH = join(import.meta.dirname, "..", "..", "schema", "capsule-0.1.schema.json");
-const SCHEMA = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) as SchemaObject;
+const SCHEMA = SCHEMA_JSON as SchemaObject;
 
 const ajv = newValidator();
 const validate = ajv.compile<Manifest>(SCHEMA);

@@ -1,16 +1,24 @@
 {
   "name": "agent-capsule",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=22.13.0"
   },
   "bin": {
-    "capsule": "src/cli.ts",
-    "agent-capsule": "src/cli.ts"
+    "capsule": "dist/cli.js",
+    "agent-capsule": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "schema",
+    "README.md",
+    "docs/SPEC.md",
+    "templates"
+  ],
   "scripts": {
+    "build": "node scripts/build.js",
+    "prepack": "npm run build && npm test",
     "test": "node --test \"tests/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck"
@@ -25,6 +33,7 @@
     "@types/node": "^26.2.0",
     "@types/yauzl": "^3.4.0",
     "@types/yazl": "^3.3.1",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   }
 }

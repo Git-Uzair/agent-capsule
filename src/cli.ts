@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
+import { probeSqliteSupport } from "./core/probe.ts";
 import { conformanceCommand } from "./commands/conformance.ts";
 import { exportPluginCommand } from "./commands/export-plugin.ts";
 import { injectCommand } from "./commands/inject.ts";
@@ -35,6 +36,11 @@ ${[...COMMANDS.keys()].map((k) => `  ${k}`).join("\n")}
 `;
 
 export async function runCli(argv: string[]): Promise<number> {
+  const probe = probeSqliteSupport();
+  if (!probe.ok) {
+    process.stderr.write(`${probe.error}\n`);
+    return 1;
+  }
   const [cmd, ...rest] = argv;
   if (cmd === "--version" || cmd === "-v") {
     process.stdout.write(VERSION_LINE + "\n");
