@@ -542,6 +542,26 @@ test("startup refuses on a homoglyph tool-name collision", async () => {
   });
 });
 
+test("startup refuses a manifest tool that collides with a built-in name", async () => {
+  await withHome(async (home) => {
+    // `capsule_info` is refused by the manifest's reserved-prefix rule, which is case-sensitive;
+    // `Capsule_info` passes it and is the same name to a reader, so the built-ins have to be part
+    // of the collision check or the look-alike gets served beside the tool it imitates.
+    const capsule = await packCapsule(home, (draft) => {
+      draft.tools = [...draft.tools, plainTool("Capsule_info")];
+    });
+
+    assert.throws(
+      () => createMcpServer({ capsule }),
+      (e: Error & { code?: string }) => {
+        assert.equal(e.code, "E_CONTENT");
+        assert.equal(e.message, "tool name collision: Capsule_info ~ capsule_info");
+        return true;
+      },
+    );
+  });
+});
+
 test("resources/read returns capsule:// text and a blob, and rejects an unlisted uri", async () => {
   await withHome(async (home) => {
     const capsule = await packCapsule(home);

@@ -1,11 +1,25 @@
 import { existsSync } from "node:fs";
 import { CapsuleError } from "../core/errors.ts";
-import type { ManifestTool } from "../format/manifest.ts";
+import type { LoadedCapsule } from "../format/capsule.ts";
+import type { EffectName, ManifestCapabilities, ManifestMeta, ManifestTool } from "../format/manifest.ts";
 import { openSidecar, sidecarPaths } from "../runtime/invoke.ts";
 import { openJournal } from "../runtime/journal.ts";
 import { replayRun } from "../runtime/replay.ts";
-import { sanitizeModelText } from "../security/text.ts";
+import { sanitizeModelText, sanitizeValue } from "../security/text.ts";
 import type { McpServerContext } from "./call.ts";
+
+/** How much of any one piece of capsule prose an introspecting agent is given. */
+const MAX_PROSE_CHARS = 1024;
+
+/** What `capsule_info` answers: the capsule's identity, what it may do, and the tools served. */
+type CapsuleInfo = {
+  capsuleId: string;
+  keyId: string;
+  trust: LoadedCapsule["trust"];
+  meta: ManifestMeta;
+  capabilities: ManifestCapabilities;
+  tools: { name: string; title: string; description: string; effects: EffectName[] }[];
+};
 
 export const BUILTIN_TOOLS: ManifestTool[] = [
   {
@@ -63,24 +77,36 @@ export async function handleBuiltinCall(
 ): Promise<unknown> {
   switch (tool) {
     case "capsule_info": {
-      const meta = ctx.capsule.manifest.meta;
-      return {
+      const manifest = ctx.capsule.manifest;
+      // The whole payload is cleaned in one pass rather than slot by slot: every string in it is
+      // manifest text on its way to a model, and an optional block like `meta.author` is otherwise
+      // only as safe as the list of fields somebody remembered to name. Suppressed tools are left
+      // out — a tool the catalog refused to serve must not be described back to the caller either,
+      // or introspection becomes the way to read the text suppression exists to withhold.
+      const info = sanitizeValue({
         capsuleId: ctx.capsule.capsuleId,
         keyId: ctx.capsule.keyId,
         trust: ctx.capsule.trust,
-        meta: {
-          ...meta,
-          title: sanitizeModelText(meta.title, 1024),
-          description: sanitizeModelText(meta.description, 1024),
-        },
-        capabilities: ctx.capsule.manifest.capabilities,
-        tools: ctx.capsule.manifest.tools.map((t) => ({
-          name: t.name,
-          title: sanitizeModelText(t.title, 1024),
-          description: sanitizeModelText(t.description, 1024),
-          effects: [...t.effects],
-        })),
-      };
+        meta: manifest.meta,
+        capabilities: manifest.capabilities,
+        tools: manifest.tools
+          .filter((tool) => ctx.served.has(tool.name))
+          .map((tool) => ({
+            name: tool.name,
+            title: tool.title,
+            description: tool.description,
+            effects: tool.effects,
+          })),
+      }) as CapsuleInfo;
+      // Capping happens after cleaning, not as part of it: the truncation marker is our own text,
+      // and a second sanitising pass would rewrite the ellipsis it ends with.
+      info.meta.title = sanitizeModelText(info.meta.title, MAX_PROSE_CHARS);
+      info.meta.description = sanitizeModelText(info.meta.description, MAX_PROSE_CHARS);
+      for (const tool of info.tools) {
+        tool.title = sanitizeModelText(tool.title, MAX_PROSE_CHARS);
+        tool.description = sanitizeModelText(tool.description, MAX_PROSE_CHARS);
+      }
+      return info;
     }
     case "capsule_runs": {
       const limit = typeof args["limit"] === "number" ? args["limit"] : 10;

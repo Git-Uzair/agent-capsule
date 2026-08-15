@@ -4,6 +4,7 @@ import type { LoadedCapsule } from "../format/capsule.ts";
 import type { Manifest } from "../format/manifest.ts";
 import type { GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
+import { BUILTIN_TOOLS } from "./builtin.ts";
 import { handleToolsCall, type McpServerContext } from "./call.ts";
 import { assertNoToolNameCollision, buildToolList, isTextMimeType, listResources } from "./catalog.ts";
 import {
@@ -70,8 +71,13 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     });
 
   // Both refusals happen here rather than on first request: a capsule whose catalog cannot be served
-  // safely must not get as far as answering `initialize`.
-  assertNoToolNameCollision(manifest.tools.map((tool) => tool.name));
+  // safely must not get as far as answering `initialize`. The built-ins are checked alongside the
+  // manifest's own tools, because the reserved-prefix rule is case-sensitive: `Capsule_info` is a
+  // legal manifest name and the same name as `capsule_info` to whoever reads the list.
+  assertNoToolNameCollision([
+    ...manifest.tools.map((tool) => tool.name),
+    ...BUILTIN_TOOLS.map((tool) => tool.name),
+  ]);
   const tools = buildToolList(manifest, { allowSuspicious: opts.allowSuspicious === true, warn });
   const resources = listResources(manifest);
 

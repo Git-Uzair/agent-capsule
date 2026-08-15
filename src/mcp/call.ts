@@ -119,9 +119,11 @@ export async function handleToolsCall(
       res = await handleBuiltinCall(name, args, ctx);
     } catch (err) {
       if (err instanceof CapsuleError) {
+        // A built-in's failure is an outcome a model reads, so its message is cleaned and capped
+        // exactly like a guest tool's: the text can carry a caller's own `runId` straight back.
         return {
           resultType: "complete",
-          content: [textContent(`${err.code}: ${err.message}`)],
+          content: [textContent(`${err.code}: ${sanitizeModelText(err.message, MAX_MESSAGE_CHARS)}`)],
           isError: true,
           _meta: { code: err.code, ...ctx.resultMeta },
         };
