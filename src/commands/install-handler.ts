@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 
 const USAGE = "usage: capsule install-handler [--uninstall] [--dry-run] [--yes]";
@@ -27,8 +25,7 @@ export function buildRegCommands(opts?: {
 
   return [
     ["add", "HKCU\\Software\\Classes\\.capsule", "/ve", "/d", "AgentCapsule.File", "/f"],
-    ["add", "HKCU\\Software\\Classes\\AgentCapsule.File", "/ve", "/d", "Agent Capsule Package", "/f"],
-    ["add", "HKCU\\Software\\Classes\\AgentCapsule.File", "/v", "FriendlyTypeName", "/d", "Agent Capsule Package", "/f"],
+    ["add", "HKCU\\Software\\Classes\\AgentCapsule.File", "/ve", "/d", "Agent Capsule", "/f"],
     [
       "add",
       "HKCU\\Software\\Classes\\AgentCapsule.File\\shell\\open\\command",
@@ -124,96 +121,34 @@ export async function runInstallHandler(argv: string[]): Promise<number> {
 
   const platform = process.platform;
 
-  if (platform === "win32") {
-    const cmds = buildRegCommands({ uninstall });
-    if (dryRun || !yes) {
-      for (const cmd of cmds) {
-        process.stdout.write(`reg ${cmd.join(" ")}\n`);
-      }
-      return 0;
-    }
+  if (platform !== "win32") {
+    process.stderr.write(`not supported on ${platform} in v0.1\n`);
+    return 2;
+  }
 
+  const cmds = buildRegCommands({ uninstall });
+  if (dryRun || !yes) {
     for (const cmd of cmds) {
-      const res = spawnSync("reg.exe", cmd, { encoding: "utf8", stdio: "pipe" });
-      if (res.status !== 0 && !uninstall) {
-        throw new CapsuleError(
-          "E_USAGE",
-          `reg.exe failed (${res.status}): ${res.stderr || res.stdout || "unknown error"}`,
-        );
-      }
+      process.stdout.write(`reg ${cmd.join(" ")}\n`);
     }
-    process.stdout.write(
-      uninstall
-        ? "uninstalled Agent Capsule file associations\n"
-        : "installed Agent Capsule file associations for .capsule\n",
-    );
     return 0;
   }
 
-  if (platform === "linux") {
-    const home = homedir();
-    const desktopPath = join(home, ".local", "share", "applications", "agent-capsule.desktop");
-    const mimePath = join(home, ".local", "share", "mime", "packages", "agent-capsule.xml");
-
-    if (dryRun || !yes) {
-      if (uninstall) {
-        process.stdout.write(`rm -f ${desktopPath}\n`);
-        process.stdout.write(`rm -f ${mimePath}\n`);
-      } else {
-        process.stdout.write(`write ${desktopPath}:\n${generateLinuxDesktopFile()}\n`);
-        process.stdout.write(`write ${mimePath}:\n${generateLinuxMimeXml()}\n`);
-      }
-      return 0;
+  for (const cmd of cmds) {
+    const res = spawnSync("reg.exe", cmd, { encoding: "utf8", stdio: "pipe" });
+    if (res.status !== 0 && !uninstall) {
+      throw new CapsuleError(
+        "E_USAGE",
+        `reg.exe failed (${res.status}): ${res.stderr || res.stdout || "unknown error"}`,
+      );
     }
-
-    if (uninstall) {
-      try {
-        await unlink(desktopPath);
-      } catch {
-        // ignore
-      }
-      try {
-        await unlink(mimePath);
-      } catch {
-        // ignore
-      }
-    } else {
-      await mkdir(dirname(desktopPath), { recursive: true });
-      await writeFile(desktopPath, generateLinuxDesktopFile(), "utf8");
-      await mkdir(dirname(mimePath), { recursive: true });
-      await writeFile(mimePath, generateLinuxMimeXml(), "utf8");
-    }
-
-    spawnSync("update-desktop-database", [join(home, ".local", "share", "applications")], {
-      stdio: "ignore",
-    });
-    spawnSync("update-mime-database", [join(home, ".local", "share", "mime")], {
-      stdio: "ignore",
-    });
-
-    process.stdout.write(
-      uninstall
-        ? "uninstalled Agent Capsule Linux desktop associations\n"
-        : "installed Agent Capsule Linux desktop associations\n",
-    );
-    return 0;
   }
-
-  if (platform === "darwin") {
-    if (dryRun || !yes) {
-      process.stdout.write(generateMacPlist() + "\n");
-      return 0;
-    }
-    process.stdout.write(
-      uninstall
-        ? "uninstalled Agent Capsule macOS handler\n"
-        : "installed Agent Capsule macOS handler\n",
-    );
-    return 0;
-  }
-
-  process.stderr.write(`not supported on ${platform} in v0.1\n`);
-  return 2;
+  process.stdout.write(
+    uninstall
+      ? "uninstalled Agent Capsule file associations\n"
+      : "installed Agent Capsule file associations for .capsule\n",
+  );
+  return 0;
 }
 
 export const installHandlerCommand = runInstallHandler;

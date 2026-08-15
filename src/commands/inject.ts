@@ -3,11 +3,18 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { CapsuleError } from "../core/errors.ts";
+import { emptyDict } from "../security/store.ts";
 
 export type ClientType = "claude" | "cursor" | "windsurf" | "generic";
 
+export type McpServerConfig = {
+  type: "stdio";
+  command: string;
+  args: string[];
+};
+
 const USAGE =
-  "usage: capsule inject <file> [--client claude|cursor|windsurf|generic] [--config <path>] [--stdout] [--name <serverName>] [--dry-run] [--yes]";
+  "usage: capsule inject <file> [--client-config <path>] [--config <path>] [--client claude|cursor|windsurf|generic] [--stdout] [--name <serverName>] [--dry-run] [--yes]";
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
@@ -46,9 +53,10 @@ export function defaultClientConfigPath(client: ClientType): string {
 export function generateMcpServerConfig(
   capsulePath: string,
   _name?: string,
-): { command: string; args: string[] } {
+): McpServerConfig {
   return {
-    command: "capsule",
+    type: "stdio",
+    command: "agent-capsule",
     args: ["mcp", resolve(capsulePath)],
   };
 }
@@ -56,13 +64,13 @@ export function generateMcpServerConfig(
 export function injectConfig(
   configJson: string,
   serverName: string,
-  serverConfig: { command: string; args: string[] },
+  serverConfig: { type?: string; command: string; args: string[] },
 ): string {
   const trimmed = configJson.trim();
   let parsed: Record<string, unknown>;
 
   if (trimmed === "") {
-    parsed = {};
+    parsed = emptyDict<unknown>();
   } else {
     try {
       parsed = JSON.parse(configJson);
@@ -75,13 +83,27 @@ export function injectConfig(
     throw new CapsuleError("E_USAGE", "client config must be a JSON object");
   }
 
-  if (typeof parsed.mcpServers !== "object" || parsed.mcpServers === null || Array.isArray(parsed.mcpServers)) {
-    parsed.mcpServers = {};
+  const servers = emptyDict<unknown>();
+  if (parsed.mcpServers !== undefined) {
+    if (typeof parsed.mcpServers !== "object" || parsed.mcpServers === null || Array.isArray(parsed.mcpServers)) {
+      throw new CapsuleError("E_USAGE", "malformed config: mcpServers must be an object");
+    }
+    for (const [key, value] of Object.entries(parsed.mcpServers as Record<string, unknown>)) {
+      servers[key] = value;
+    }
   }
 
-  (parsed.mcpServers as Record<string, unknown>)[serverName] = serverConfig;
+  servers[serverName] = serverConfig;
 
-  return JSON.stringify(parsed, null, 2) + "\n";
+  const result = emptyDict<unknown>();
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key !== "mcpServers") {
+      result[key] = value;
+    }
+  }
+  result.mcpServers = servers;
+
+  return JSON.stringify(result, null, 2) + "\n";
 }
 
 export async function runInject(argv: string[]): Promise<number> {
@@ -91,6 +113,7 @@ export async function runInject(argv: string[]): Promise<number> {
   let serverName: string | undefined;
   let stdoutMode = false;
   let dryRun = false;
+  let yes = false;
 
   const valueOf = (arg: string, next: string | undefined): string =>
     next === undefined ? usage(`${arg} needs a value`) : next;
@@ -112,7 +135,7 @@ export async function runInject(argv: string[]): Promise<number> {
     } else if (arg === "--dry-run") {
       dryRun = true;
     } else if (arg === "--yes") {
-      // Non-interactive confirmation
+      yes = true;
     } else if (arg.startsWith("-")) {
       usage(`unknown option: ${arg}`);
     } else if (file === undefined) {
@@ -124,6 +147,14 @@ export async function runInject(argv: string[]): Promise<number> {
 
   if (!file) {
     usage("missing capsule file");
+  }
+
+  if (!existsSync(file)) {
+    throw new CapsuleError("E_USAGE", "capsule file does not exist");
+  }
+  const fileStat = await stat(file);
+  if (fileStat.isDirectory()) {
+    throw new CapsuleError("E_USAGE", "capsule path is a directory");
   }
 
   const derivedName = serverName || basename(file, ".capsule");
@@ -140,6 +171,9 @@ export async function runInject(argv: string[]): Promise<number> {
   if (existsSync(targetConfigPath)) {
     fileExisted = true;
     const st = await stat(targetConfigPath);
+    if (st.isDirectory()) {
+      throw new CapsuleError("E_USAGE", "config path is a directory");
+    }
     if (st.size > 1024 * 1024) {
       throw new CapsuleError("E_USAGE", "config file exceeds 1 MiB limit");
     }
@@ -152,12 +186,7 @@ export async function runInject(argv: string[]): Promise<number> {
     serverConfig,
   );
 
-  if (stdoutMode) {
-    process.stdout.write(output);
-    return 0;
-  }
-
-  if (dryRun) {
+  if (stdoutMode || dryRun || !yes) {
     process.stdout.write(output);
     return 0;
   }

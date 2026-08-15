@@ -18,9 +18,12 @@ import {
   generateMacPlist,
   runInstallHandler,
 } from "../src/commands/install-handler.ts";
+import { exportPlugin, runExportPlugin } from "../src/commands/export-plugin.ts";
+import { packDirectory } from "../src/format/capsule.ts";
 import { CapsuleError } from "../src/core/errors.ts";
 
 const CLI = join(import.meta.dirname, "..", "src", "cli.ts");
+const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
 
 function withTempDir(fn: (dir: string) => void | Promise<void>): Promise<void> {
   const dir = join(".tmp", `test-interop-${randomUUID()}`);
@@ -29,6 +32,61 @@ function withTempDir(fn: (dir: string) => void | Promise<void>): Promise<void> {
     rmSync(dir, { recursive: true, force: true });
   });
 }
+
+test("export-plugin creates plugin.json, mcp.json, and skills/<name>/SKILL.md with capability disclosure and tool table", async () => {
+  await withTempDir(async (dir) => {
+    const capsulePath = join(dir, "hello-1.0.0.capsule");
+    await packDirectory(FIXTURE, capsulePath, { homeDir: dir });
+
+    const pluginDir = join(dir, "exported-plugin");
+    const code = await runExportPlugin([capsulePath, "-o", pluginDir]);
+    assert.equal(code, 0);
+
+    const pluginJsonPath = join(pluginDir, "plugin.json");
+    assert.ok(existsSync(pluginJsonPath));
+    const pluginJson = JSON.parse(readFileSync(pluginJsonPath, "utf8"));
+    assert.deepEqual(pluginJson, {
+      name: "hello",
+      description: "Reference capsule used by the agent-capsule test suite.",
+      version: "1.0.0",
+    });
+
+    const mcpJsonPath = join(pluginDir, "mcp.json");
+    assert.ok(existsSync(mcpJsonPath));
+    const mcpJson = JSON.parse(readFileSync(mcpJsonPath, "utf8"));
+    assert.deepEqual(mcpJson, {
+      mcpServers: {
+        hello: {
+          type: "stdio",
+          command: "agent-capsule",
+          args: ["mcp", resolve(capsulePath)],
+        },
+      },
+    });
+
+    const skillPath = join(pluginDir, "skills", "hello", "SKILL.md");
+    assert.ok(existsSync(skillPath));
+    const skillContent = readFileSync(skillPath, "utf8");
+
+    assert.ok(skillContent.includes("Hello Capsule"));
+    assert.ok(skillContent.includes("Reference capsule used by the agent-capsule test suite."));
+    assert.ok(skillContent.includes("This capsule is sandboxed; its declared capabilities are"));
+    assert.ok(skillContent.includes("greet"));
+    assert.ok(skillContent.includes("name"));
+  });
+});
+
+test("export-plugin throws E_USAGE on missing capsule file", async () => {
+  await withTempDir(async (dir) => {
+    const missingCapsule = join(dir, "missing.capsule");
+    const pluginDir = join(dir, "exported-plugin");
+
+    await assert.rejects(
+      () => runExportPlugin([missingCapsule, "-o", pluginDir]),
+      (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+    );
+  });
+});
 
 test("defaultClientConfigPath returns expected path for each client", () => {
   const claudePath = defaultClientConfigPath("claude");
@@ -54,12 +112,13 @@ test("defaultClientConfigPath returns expected path for each client", () => {
 test("generateMcpServerConfig resolves absolute capsule path", () => {
   const relPath = "foo/bar/hello.capsule";
   const cfg = generateMcpServerConfig(relPath);
-  assert.equal(cfg.command, "capsule");
+  assert.equal(cfg.type, "stdio");
+  assert.equal(cfg.command, "agent-capsule");
   assert.deepEqual(cfg.args, ["mcp", resolve(relPath)]);
 });
 
 test("injectConfig merges into empty config", () => {
-  const serverConfig = { command: "capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
   const out = injectConfig("{}", "hello", serverConfig);
   const parsed = JSON.parse(out);
   assert.deepEqual(parsed, {
@@ -80,7 +139,7 @@ test("injectConfig preserves existing unrelated servers and overwrites existing 
     null,
     2,
   );
-  const serverConfig = { command: "capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
   const out = injectConfig(initial, "hello", serverConfig);
   const parsed = JSON.parse(out);
 
@@ -89,7 +148,7 @@ test("injectConfig preserves existing unrelated servers and overwrites existing 
 });
 
 test("injectConfig handles empty string as empty object", () => {
-  const serverConfig = { command: "capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
   const out = injectConfig("", "hello", serverConfig);
   const parsed = JSON.parse(out);
   assert.deepEqual(parsed, {
@@ -100,7 +159,7 @@ test("injectConfig handles empty string as empty object", () => {
 });
 
 test("injectConfig refuses config that is not a JSON object", () => {
-  const serverConfig = { command: "capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
   assert.throws(
     () => injectConfig("[]", "hello", serverConfig),
     (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
@@ -113,6 +172,30 @@ test("injectConfig refuses config that is not a JSON object", () => {
     () => injectConfig("123", "hello", serverConfig),
     (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
   );
+});
+
+test("injectConfig refuses non-object mcpServers", () => {
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  assert.throws(
+    () => injectConfig('{"mcpServers": "invalid"}', "hello", serverConfig),
+    (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+  );
+  assert.throws(
+    () => injectConfig('{"mcpServers": [1, 2, 3]}', "hello", serverConfig),
+    (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+  );
+  assert.throws(
+    () => injectConfig('{"mcpServers": null}', "hello", serverConfig),
+    (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+  );
+});
+
+test("injectConfig handles __proto__ property without polluting Object.prototype", () => {
+  const serverConfig = { type: "stdio", command: "agent-capsule", args: ["mcp", "C:\\test\\hello.capsule"] };
+  const out = injectConfig('{"mcpServers":{"__proto__":{"command":"foo"}}}', "hello", serverConfig);
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.mcpServers.hello.command, "agent-capsule");
+  assert.equal(({} as Record<string, unknown>)["command"], undefined);
 });
 
 test("runInject with --stdout writes merged json to stdout", async () => {
@@ -128,7 +211,8 @@ test("runInject with --stdout writes merged json to stdout", async () => {
     assert.deepEqual(parsed, {
       mcpServers: {
         "my-tool": {
-          command: "capsule",
+          type: "stdio",
+          command: "agent-capsule",
           args: ["mcp", resolve(capsuleFile)],
         },
       },
@@ -136,7 +220,7 @@ test("runInject with --stdout writes merged json to stdout", async () => {
   });
 });
 
-test("runInject atomic write and backup file creation", async () => {
+test("runInject atomic write and backup file creation with --yes", async () => {
   await withTempDir(async (dir) => {
     const capsuleFile = join(dir, "greet.capsule");
     writeFileSync(capsuleFile, "dummy");
@@ -144,13 +228,14 @@ test("runInject atomic write and backup file creation", async () => {
     const initialConfig = JSON.stringify({ mcpServers: { existing: { command: "cmd", args: [] } } });
     writeFileSync(configFile, initialConfig);
 
-    const code = await runInject([capsuleFile, "--config", configFile, "--name", "my-greet"]);
+    const code = await runInject([capsuleFile, "--client-config", configFile, "--name", "my-greet", "--yes"]);
     assert.equal(code, 0);
 
     const updated = JSON.parse(readFileSync(configFile, "utf8"));
     assert.deepEqual(updated.mcpServers.existing, { command: "cmd", args: [] });
     assert.deepEqual(updated.mcpServers["my-greet"], {
-      command: "capsule",
+      type: "stdio",
+      command: "agent-capsule",
       args: ["mcp", resolve(capsuleFile)],
     });
 
@@ -161,7 +246,7 @@ test("runInject atomic write and backup file creation", async () => {
   });
 });
 
-test("runInject with --dry-run leaves file byte-identical", async () => {
+test("runInject without --yes leaves file byte-identical", async () => {
   await withTempDir(async (dir) => {
     const capsuleFile = join(dir, "tool.capsule");
     writeFileSync(capsuleFile, "dummy");
@@ -171,13 +256,38 @@ test("runInject with --dry-run leaves file byte-identical", async () => {
 
     const stdoutData = execFileSync(
       process.execPath,
-      [CLI, "inject", capsuleFile, "--config", configFile, "--dry-run"],
+      [CLI, "inject", capsuleFile, "--client-config", configFile],
       { encoding: "utf8" },
     );
 
     assert.equal(readFileSync(configFile, "utf8"), initialConfig);
     const parsedOut = JSON.parse(stdoutData);
     assert.ok(parsedOut.mcpServers.tool);
+  });
+});
+
+test("runInject with missing capsule file throws E_USAGE", async () => {
+  await withTempDir(async (dir) => {
+    const missingCapsule = join(dir, "missing.capsule");
+    const configFile = join(dir, "config.json");
+    writeFileSync(configFile, "{}");
+
+    await assert.rejects(
+      () => runInject([missingCapsule, "--client-config", configFile, "--yes"]),
+      (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+    );
+  });
+});
+
+test("runInject with directory config path throws E_USAGE", async () => {
+  await withTempDir(async (dir) => {
+    const capsuleFile = join(dir, "tool.capsule");
+    writeFileSync(capsuleFile, "dummy");
+
+    await assert.rejects(
+      () => runInject([capsuleFile, "--client-config", dir, "--yes"]),
+      (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
+    );
   });
 });
 
@@ -190,7 +300,7 @@ test("runInject refuses config file over 1 MiB", async () => {
     writeFileSync(configFile, bigData);
 
     await assert.rejects(
-      () => runInject([capsuleFile, "--config", configFile]),
+      () => runInject([capsuleFile, "--config", configFile, "--yes"]),
       (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
     );
   });
@@ -198,7 +308,7 @@ test("runInject refuses config file over 1 MiB", async () => {
 
 test("buildRegCommands returns expected argv arrays for install and uninstall", () => {
   const installCmds = buildRegCommands({ nodePath: "C:\\Node\\node.exe", cliPath: "C:\\Capsule\\cli.ts" });
-  assert.equal(installCmds.length, 4);
+  assert.equal(installCmds.length, 3);
   assert.deepEqual(installCmds[0], [
     "add",
     "HKCU\\Software\\Classes\\.capsule",
@@ -212,19 +322,10 @@ test("buildRegCommands returns expected argv arrays for install and uninstall", 
     "HKCU\\Software\\Classes\\AgentCapsule.File",
     "/ve",
     "/d",
-    "Agent Capsule Package",
+    "Agent Capsule",
     "/f",
   ]);
   assert.deepEqual(installCmds[2], [
-    "add",
-    "HKCU\\Software\\Classes\\AgentCapsule.File",
-    "/v",
-    "FriendlyTypeName",
-    "/d",
-    "Agent Capsule Package",
-    "/f",
-  ]);
-  assert.deepEqual(installCmds[3], [
     "add",
     "HKCU\\Software\\Classes\\AgentCapsule.File\\shell\\open\\command",
     "/ve",
@@ -258,27 +359,31 @@ test("generateMacPlist returns valid plist xml", () => {
   assert.ok(plist.includes("<string>capsule</string>"));
 });
 
-test("runInstallHandler supports --dry-run across platforms", () => {
-  const stdoutData = execFileSync(process.execPath, [CLI, "install-handler", "--dry-run"], {
-    encoding: "utf8",
-  });
-  assert.ok(stdoutData.length > 0);
+test("runInstallHandler without --yes leaves registry untouched and prints commands", async () => {
+  const code = await runInstallHandler([]);
+  assert.equal(code, process.platform === "win32" ? 0 : 2);
 });
 
-test("cli runs inject and install-handler commands via child process", async () => {
+test("cli runs export-plugin, inject, and install-handler commands via child process", async () => {
   await withTempDir(async (dir) => {
-    const capsuleFile = join(dir, "my.capsule");
-    writeFileSync(capsuleFile, "dummy");
+    const capsulePath = join(dir, "my.capsule");
+    await packDirectory(FIXTURE, capsulePath, { homeDir: dir });
 
-    const out = execFileSync(process.execPath, [CLI, "inject", capsuleFile, "--stdout"], {
+    const pluginDir = join(dir, "plug");
+    const exportOut = execFileSync(process.execPath, [CLI, "export-plugin", capsulePath, "-o", pluginDir], {
+      encoding: "utf8",
+    });
+    assert.ok(existsSync(join(pluginDir, "plugin.json")));
+
+    const out = execFileSync(process.execPath, [CLI, "inject", capsulePath, "--stdout"], {
       encoding: "utf8",
     });
     const parsed = JSON.parse(out);
     assert.ok(parsed.mcpServers.my);
 
-    const dryHandlerOut = execFileSync(process.execPath, [CLI, "install-handler", "--dry-run"], {
+    const dryHandlerOut = execFileSync(process.execPath, [CLI, "install-handler"], {
       encoding: "utf8",
     });
-    assert.ok(dryHandlerOut.length > 0);
+    assert.ok(dryHandlerOut.length > 0 || process.platform !== "win32");
   });
 });

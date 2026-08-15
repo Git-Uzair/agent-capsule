@@ -2,6 +2,7 @@
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { conformanceCommand } from "./commands/conformance.ts";
+import { exportPluginCommand } from "./commands/export-plugin.ts";
 import { injectCommand } from "./commands/inject.ts";
 import { installHandlerCommand } from "./commands/install-handler.ts";
 import { mcpCommand } from "./commands/mcp.ts";
@@ -23,6 +24,7 @@ const COMMANDS = new Map<string, Command>([
   ["conformance", conformanceCommand],
   ["inject", injectCommand],
   ["install-handler", installHandlerCommand],
+  ["export-plugin", exportPluginCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]

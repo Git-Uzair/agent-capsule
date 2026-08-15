@@ -2175,7 +2175,9 @@ report type.
 
 ## Task 25 — Interop and installation: Agent Plugins export, MCP config injection, `.capsule` handler
 
-**Status:** Completed (PASS)
+**Status:** In Progress (User override: unlimited verification cycles)
+**Attempt Ledger:**
+- attempt 1: initial Task 25 implementation -> verifier FAIL (missing export-plugin command, inject missing default dry-run without --yes, command "capsule" instead of "agent-capsule", win32/non-win32 install-handler semantics)
 
 **Goal:** meet the 2026 ecosystem where it is, without guessing at anybody's private paths.
 **Difficulty:** EASY
