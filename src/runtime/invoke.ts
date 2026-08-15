@@ -5,7 +5,7 @@ import { CapsuleError } from "../core/errors.ts";
 import { newValidator } from "../core/schema.ts";
 import type { LoadedCapsule } from "../format/capsule.ts";
 import type { GrantsStore } from "../security/grants.ts";
-import { sanitizeModelText } from "../security/text.ts";
+import { sanitizeModelText, sanitizeValue } from "../security/text.ts";
 import { createEffects, type EffectsController } from "./effects.ts";
 import { createFetchPort, type FetchInit } from "./fetch.ts";
 import { runGuest } from "./guest.ts";
@@ -86,19 +86,13 @@ export function errorOf(e: unknown): InvokeError {
 /**
  * Cleans every string in the guest's value. The value's next stop is a model's context, so the whole
  * of it is treated as hostile text: escape sequences, zero-width characters and bidi overrides are
- * removed and the length is capped. Property names are left as they are — sanitising them could
- * collapse two distinct keys into one and silently drop a field.
- *
- * Exported because the digest a run records is the digest of the *cleaned* value: a replay that
- * hashed the raw one would call every capsule with hostile text in its output a divergence.
+ * removed and the length is capped. The cap lives here rather than in the sanitiser because it is
+ * this path's promise about how much of any one string a caller is given — and the replay engine has
+ * to keep the same promise, since the digest under comparison was taken after this step. That is why
+ * this wrapper is exported rather than the constant: one owner of the cap, two callers of it.
  */
-export function sanitizeValue(value: unknown): unknown {
-  if (typeof value === "string") return sanitizeModelText(value, MAX_VALUE_CHARS);
-  if (Array.isArray(value)) return value.map(sanitizeValue);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, sanitizeValue(v)]));
-  }
-  return value;
+export function sanitizeRunValue(value: unknown): unknown {
+  return sanitizeValue(value, MAX_VALUE_CHARS);
 }
 
 /**
@@ -275,7 +269,7 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     // Sanitised before it is checked, so the value the schema passed is the value the caller gets:
     // checking the raw text and returning a cleaned one would let a tool advertise a shape it does
     // not in fact deliver.
-    const value = sanitizeValue(returned);
+    const value = sanitizeRunValue(returned);
     if (tool.outputSchema !== undefined) {
       const invalid = schemaErrors(tool.outputSchema, value);
       if (invalid !== undefined) {

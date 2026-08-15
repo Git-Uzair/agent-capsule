@@ -47,6 +47,25 @@ export function sanitizeModelText(s: string, max?: number): string {
   return result;
 }
 
+/**
+ * Cleans every string at any depth of a JSON value, capping each one when `max` is given. Property
+ * names are left exactly as they are: sanitising one could collapse two distinct keys into a single
+ * one and silently drop a field, and in a tool schema the key *is* the argument name the model has
+ * to send back. A caller that serves keys to a model screens them instead — see `stringLeaves`.
+ *
+ * The run path, the replay path and the MCP tool catalog share this on purpose. The digest a run
+ * records is the digest of the *cleaned* value, so a replay that cleaned it even slightly
+ * differently would call every capsule with hostile text in its output a divergence.
+ */
+export function sanitizeValue(value: unknown, max?: number): unknown {
+  if (typeof value === "string") return sanitizeModelText(value, max);
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, max));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, sanitizeValue(v, max)]));
+  }
+  return value;
+}
+
 const HOMOGLYPH_MAP: Record<string, string> = {
   а: "a",
   е: "e",
@@ -132,8 +151,11 @@ export function scanForInjection(s: string): string[] {
 }
 
 /**
- * Every string at any depth of a JSON value, in document order. Model-facing text hides in a schema
- * leaf as readily as in a description, so anything that screens a tool has to look at all of it.
+ * Every string at any depth of a JSON value — property keys included — in document order. Model-facing
+ * text hides in a schema leaf as readily as in a description, and a key is served verbatim because it
+ * is the argument name the model has to send back: an injection sentence used as a property name
+ * reaches the context exactly like one used as a description, so anything that screens a tool has to
+ * look at both halves of every entry.
  */
 export function stringLeaves(value: unknown, out: string[] = []): string[] {
   if (typeof value === "string") {
@@ -143,7 +165,8 @@ export function stringLeaves(value: unknown, out: string[] = []): string[] {
       stringLeaves(item, out);
     }
   } else if (typeof value === "object" && value !== null) {
-    for (const item of Object.values(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      out.push(key);
       stringLeaves(item, out);
     }
   }

@@ -5,7 +5,7 @@ import type { LoadedCapsule } from "../format/capsule.ts";
 import { createEffects, type EffectDispatch } from "./effects.ts";
 import { createFetchPort, type FetchInit } from "./fetch.ts";
 import { runGuest } from "./guest.ts";
-import { errorOf, openSidecar, sanitizeValue, sidecarPaths, type InvokeError } from "./invoke.ts";
+import { errorOf, openSidecar, sanitizeRunValue, sidecarPaths, type InvokeError } from "./invoke.ts";
 import { EVENT, openJournal, type Journal, type JournalEvent } from "./journal.ts";
 import { buildPolicy } from "./policy.ts";
 import { openState, type CapsuleState } from "./state.ts";
@@ -223,7 +223,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
     try {
       // Cleaned exactly as a recorded run cleans it, since the digest under comparison was taken
       // after that step and not before.
-      value = sanitizeValue(
+      value = sanitizeRunValue(
         await runGuest({
           source,
           entryPath: entry,

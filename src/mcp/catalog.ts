@@ -1,7 +1,7 @@
 import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { EffectName, Manifest } from "../format/manifest.ts";
-import { confusableSkeleton, sanitizeModelText, scanTextTree } from "../security/text.ts";
+import { confusableSkeleton, sanitizeModelText, sanitizeValue, scanTextTree } from "../security/text.ts";
 
 /**
  * A tool as an agent sees it: every piece of prose already sanitised, the declared effects attached
@@ -39,22 +39,32 @@ export function assertNoToolNameCollision(names: readonly string[]): void {
 }
 
 /**
- * Sanitises every string *value* in a JSON Schema, at any depth. Property names are deliberately
- * left alone: they are the argument names the model has to send back, so rewriting one would ask
- * the model for a field the guest never reads.
+ * The identifiers of a JSON Schema: every object key, plus every entry of a `required` array, since
+ * those name properties too. Identifiers are the one part of a schema that cannot be cleaned —
+ * rewriting one would ask the model for a field the guest never reads, and rewriting a `required`
+ * entry without its key would leave the schema demanding a property that `properties` does not
+ * declare. So an identifier carrying hidden text is answered by suppressing the whole tool instead,
+ * and the identifiers of a tool that *is* served are already their own sanitised form, which is what
+ * makes cleaning the schema unable to break the two apart.
+ *
+ * The offending identifier is deliberately not reported: it holds the escape sequences this exists to
+ * catch, and the warning is written to somebody's terminal.
  */
-function sanitizeSchemaLeaves(value: unknown): unknown {
-  if (typeof value === "string") {
-    return sanitizeModelText(value);
-  }
+function hasUnsafeIdentifier(value: unknown): boolean {
   if (Array.isArray(value)) {
-    return value.map(sanitizeSchemaLeaves);
+    return value.some(hasUnsafeIdentifier);
   }
   const record = asRecord(value);
   if (record === undefined) {
-    return value;
+    return false;
   }
-  return Object.fromEntries(Object.entries(record).map(([key, v]) => [key, sanitizeSchemaLeaves(v)]));
+  const required = record["required"];
+  if (Array.isArray(required)) {
+    if (required.some((name) => typeof name === "string" && name !== sanitizeModelText(name))) {
+      return true;
+    }
+  }
+  return Object.entries(record).some(([key, v]) => key !== sanitizeModelText(key) || hasUnsafeIdentifier(v));
 }
 
 /**
@@ -70,15 +80,21 @@ export function buildToolList(
   for (const tool of manifest.tools) {
     const title = sanitizeModelText(tool.title);
     const description = sanitizeModelText(tool.description);
-    const inputSchema = sanitizeSchemaLeaves(tool.inputSchema) as Record<string, unknown>;
+    const inputSchema = sanitizeValue(tool.inputSchema) as Record<string, unknown>;
     const outputSchema =
       tool.outputSchema === undefined
         ? undefined
-        : (sanitizeSchemaLeaves(tool.outputSchema) as Record<string, unknown>);
+        : (sanitizeValue(tool.outputSchema) as Record<string, unknown>);
 
     // Screened after sanitising, because what reaches the model is the sanitised text: a marker that
-    // only survives in the raw string is not a marker the model would ever have seen.
+    // only survives in the raw string is not a marker the model would ever have seen. Schema keys are
+    // part of that text — `scanTextTree` walks them — but they are screened on the *raw* schema,
+    // since sanitising is what a clean identifier has to survive unchanged.
     const markers = scanTextTree([title, description, inputSchema, outputSchema]);
+    if (hasUnsafeIdentifier(tool.inputSchema) || hasUnsafeIdentifier(tool.outputSchema)) {
+      markers.push("unsafe_schema_identifier");
+      markers.sort();
+    }
     if (markers.length > 0 && !opts.allowSuspicious) {
       // The name is safe to interpolate: capsule.json restricts it to `[a-zA-Z0-9_-]{1,64}`.
       opts.warn(`suppressed tool ${tool.name}: markers=${markers.join(",")}`);
