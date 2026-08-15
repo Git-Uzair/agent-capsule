@@ -64,8 +64,13 @@ export const SPAN_KIND = {
   CLIENT: 3,
 } as const;
 
-export const STATUS_CODE = {
-  OK: 1,
+/**
+ * Only two codes are ever written: a successful span leaves its status unset (`0`), which is what
+ * OTLP means by "no explicit status", and a failed one says `2`. `1` (`OK`) is reserved for a status
+ * a caller set deliberately, and nothing here sets one, so success stays `0`.
+ */
+export const SPAN_STATUS = {
+  OK: 0,
   ERROR: 2,
 } as const;
 
@@ -111,17 +116,30 @@ export function endSpan(
     ...draft,
     endTimeUnixNano,
     attributes: opts?.attributes ? [...draft.attributes, ...opts.attributes] : draft.attributes,
-    status: opts?.status ?? { code: STATUS_CODE.OK },
+    status: opts?.status ?? { code: SPAN_STATUS.OK },
   };
 }
 
-export function exportTrace(opts: {
+/** How the call reached this host, when it reached it over MCP: the protocol method and tool name. */
+export type McpCallInfo = {
+  method?: string;
+  tool?: string;
+};
+
+export type ExportTraceOptions = {
   journal: Journal;
   runId: string;
   traceparent?: string;
   capsuleName?: string;
   capsuleVersion?: string;
-}): OTelTraceExport {
+  mcp?: McpCallInfo;
+};
+
+export type WriteTraceOptions = ExportTraceOptions & {
+  traceDir?: string;
+};
+
+export function exportTrace(opts: ExportTraceOptions): OTelTraceExport {
   opts.journal.verifyChain(opts.runId);
 
   const events = opts.journal.events(opts.runId);
@@ -169,6 +187,12 @@ export function exportTrace(opts: {
     { key: ATTR.CAPSULE_RUN_ID, value: { stringValue: opts.runId } },
   ];
 
+  if (opts.mcp?.method) {
+    rootAttributes.push({ key: ATTR.MCP_METHOD_NAME, value: { stringValue: opts.mcp.method } });
+  }
+  if (opts.mcp?.tool) {
+    rootAttributes.push({ key: ATTR.MCP_TOOL_NAME, value: { stringValue: opts.mcp.tool } });
+  }
   if (runStartedPayload?.mode) {
     rootAttributes.push({ key: ATTR.CAPSULE_MODE, value: { stringValue: runStartedPayload.mode } });
   }
@@ -230,7 +254,7 @@ export function exportTrace(opts: {
       startTimeUnixNano: spanStartNano.toString(),
       endTimeUnixNano: spanEndNano.toString(),
       attributes: childAttributes,
-      status: { code: STATUS_CODE.OK },
+      status: { code: SPAN_STATUS.OK },
     });
   }
 
@@ -244,8 +268,8 @@ export function exportTrace(opts: {
     endTimeUnixNano: (currentNano > baseNano ? currentNano : baseNano + 1_000_000n).toString(),
     attributes: rootAttributes,
     status: isError
-      ? { code: STATUS_CODE.ERROR, ...(errorMessage ? { message: errorMessage } : {}) }
-      : { code: STATUS_CODE.OK },
+      ? { code: SPAN_STATUS.ERROR, ...(errorMessage ? { message: errorMessage } : {}) }
+      : { code: SPAN_STATUS.OK },
   };
 
   const resourceAttributes: OTelAttribute[] = [
@@ -273,24 +297,12 @@ export function exportTrace(opts: {
   };
 }
 
-export function writeTrace(opts: {
-  journal: Journal;
-  runId: string;
-  traceDir?: string;
-  traceparent?: string;
-  capsuleName?: string;
-  capsuleVersion?: string;
-}): string | undefined {
+export function writeTrace(opts: WriteTraceOptions): string | undefined {
   const dir = opts.traceDir ?? process.env.CAPSULE_TRACE_DIR;
   if (!dir) return undefined;
   mkdirSync(dir, { recursive: true });
-  const trace = exportTrace({
-    journal: opts.journal,
-    runId: opts.runId,
-    traceparent: opts.traceparent,
-    capsuleName: opts.capsuleName,
-    capsuleVersion: opts.capsuleVersion,
-  });
+  // The whole options object goes through, so a field added to the export can never be dropped here.
+  const trace = exportTrace(opts);
   const outPath = join(dir, `${opts.runId}.otlp.json`);
   writeFileSync(outPath, `${JSON.stringify(trace, null, 2)}\n`);
   return outPath;

@@ -38,6 +38,7 @@ export type InvokeOptions = {
   mode?: "record";
   runId?: string;
   traceparent?: string;
+  mcp?: { method?: string; tool?: string };
   grants?: Record<string, boolean> | GrantsStore;
   statePath?: string;
   journalPath?: string;
@@ -291,6 +292,7 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
           journal,
           runId,
           traceparent: opts.traceparent,
+          mcp: opts.mcp,
           capsuleName: capsule.manifest.meta.name,
           capsuleVersion: capsule.manifest.meta.version,
         });
@@ -319,6 +321,7 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
             journal,
             runId,
             traceparent: opts.traceparent,
+            mcp: opts.mcp,
             capsuleName: capsule.manifest.meta.name,
             capsuleVersion: capsule.manifest.meta.version,
           });

@@ -2,7 +2,7 @@ import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
 import { invokeTool, sidecarPaths, type InvokeResult } from "../runtime/invoke.ts";
 import { openJournal } from "../runtime/journal.ts";
-import { exportTrace } from "../runtime/trace.ts";
+import { exportTrace } from "../telemetry/otlp.ts";
 
 const USAGE =
   "usage: capsule run <file> --tool <name> [--args '<json>'] [--json] " +

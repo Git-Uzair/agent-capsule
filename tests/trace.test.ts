@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
 import { openJournal, EVENT } from "../src/runtime/journal.ts";
 import { invokeTool, sidecarPaths } from "../src/runtime/invoke.ts";
-import { exportTrace, type OTelTraceExport, type OTelSpan } from "../src/runtime/trace.ts";
+import { exportTrace, type OTelTraceExport, type OTelSpan } from "../src/telemetry/otlp.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
 const CLI = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -104,7 +104,7 @@ test("exportTrace builds valid OTelTraceExport with resourceSpans, root, and eff
       assert.equal(rootSpan.name, "execute_tool greet");
       assert.equal(rootSpan.kind, 1);
       assert.equal(rootSpan.parentSpanId, undefined);
-      assert.equal(rootSpan.status.code, 1);
+      assert.equal(rootSpan.status.code, 0);
       assert.ok(/^[0-9a-f]{32}$/.test(rootSpan.traceId));
       assert.ok(/^[0-9a-f]{16}$/.test(rootSpan.spanId));
       assert.ok(BigInt(rootSpan.startTimeUnixNano) > 0n);
@@ -117,7 +117,7 @@ test("exportTrace builds valid OTelTraceExport with resourceSpans, root, and eff
         assert.ok(child.name.startsWith("capsule.effect "));
         assert.ok(/^[0-9a-f]{16}$/.test(child.spanId));
         assert.notEqual(child.spanId, rootSpan.spanId);
-        assert.equal(child.status.code, 1);
+        assert.equal(child.status.code, 0);
         assert.equal(child.kind, 1);
       }
 
@@ -168,6 +168,52 @@ test("exportTrace respects incoming traceparent for traceId and root parentSpanI
         assert.equal(child.traceId, "4bf92f3577b34da6a3ce929d0e0e4736");
         assert.equal(child.parentSpanId, rootSpan.spanId);
       }
+    } finally {
+      journal.close();
+    }
+  });
+});
+
+test("exportTrace attaches mcp.method.name and mcp.tool.name to the root span when given mcp options", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const paths = sidecarPaths(capsule.file);
+    const runId = randomUUID();
+
+    await invokeTool({
+      capsule,
+      tool: "greet",
+      args: { name: "ada" },
+      runId,
+      journalPath: paths.journal,
+      statePath: paths.app,
+    });
+
+    const journal = openJournal(paths.journal);
+    try {
+      const trace = exportTrace({
+        journal,
+        runId,
+        mcp: { method: "tools/call", tool: "greet" },
+      });
+
+      const rootSpan = trace.resourceSpans[0]!.scopeSpans[0]!.spans[0]!;
+      const methodAttr = rootSpan.attributes.find((a: { key: string }) => a.key === "mcp.method.name");
+      const toolAttr = rootSpan.attributes.find((a: { key: string }) => a.key === "mcp.tool.name");
+      assert.equal(methodAttr?.value.stringValue, "tools/call");
+      assert.equal(toolAttr?.value.stringValue, "greet");
+
+      // A non-MCP run carries neither key: they describe the caller's protocol, not the run.
+      const plain = exportTrace({ journal, runId });
+      const plainRoot = plain.resourceSpans[0]!.scopeSpans[0]!.spans[0]!;
+      assert.equal(
+        plainRoot.attributes.find((a: { key: string }) => a.key === "mcp.method.name"),
+        undefined,
+      );
+      assert.equal(
+        plainRoot.attributes.find((a: { key: string }) => a.key === "mcp.tool.name"),
+        undefined,
+      );
     } finally {
       journal.close();
     }
@@ -263,7 +309,7 @@ test("CLI run --trace emits valid OTel JSON to stdout with resourceSpans", async
     assert.ok(parsed.resourceSpans[0]!.resource);
     assert.ok(parsed.resourceSpans[0]!.scopeSpans);
     assert.equal(parsed.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.name, "execute_tool greet");
-    assert.equal(parsed.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.status.code, 1);
+    assert.equal(parsed.resourceSpans[0]!.scopeSpans[0]!.spans[0]!.status.code, 0);
   });
 });
 

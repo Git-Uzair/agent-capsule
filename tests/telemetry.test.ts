@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
+import { createMcpServer } from "../src/mcp/server.ts";
 import { invokeTool, sidecarPaths } from "../src/runtime/invoke.ts";
 import { openJournal, EVENT } from "../src/runtime/journal.ts";
 import { ATTR } from "../src/telemetry/semconv.ts";
@@ -13,7 +14,7 @@ import {
   endSpan,
   writeTrace,
   SPAN_KIND,
-  STATUS_CODE,
+  SPAN_STATUS,
   type OTelTraceExport,
   type OTelSpan,
 } from "../src/telemetry/otlp.ts";
@@ -151,18 +152,87 @@ test("CAPSULE_TRACE_DIR file exporter writes valid OTLP JSON trace file on finis
       const rootSpan = spans[0]!;
       assert.equal(rootSpan.name, "execute_tool greet");
       assert.equal(rootSpan.kind, SPAN_KIND.INTERNAL);
-      assert.equal(rootSpan.status.code, STATUS_CODE.OK);
+      assert.equal(rootSpan.status.code, SPAN_STATUS.OK);
+      assert.equal(rootSpan.status.code, 0);
 
       const childSpans = spans.slice(1);
       for (const child of childSpans) {
         assert.equal(child.traceId, rootSpan.traceId);
         assert.equal(child.parentSpanId, rootSpan.spanId);
-        assert.equal(child.status.code, STATUS_CODE.OK);
+        assert.equal(child.status.code, SPAN_STATUS.OK);
         assert.equal(child.kind, SPAN_KIND.INTERNAL);
       }
     } finally {
       if (prevTraceDir === undefined) delete process.env.CAPSULE_TRACE_DIR;
       else process.env.CAPSULE_TRACE_DIR = prevTraceDir;
+    }
+  });
+});
+
+test("an MCP tools/call run records mcp.method.name and mcp.tool.name in its exported trace", async () => {
+  await withHome(async (home) => {
+    const traceDir = join(home, "traces");
+    const prevTraceDir = process.env.CAPSULE_TRACE_DIR;
+    process.env.CAPSULE_TRACE_DIR = traceDir;
+
+    try {
+      const capsule = await packFixture(home);
+      const server = createMcpServer({ capsule });
+
+      const response = await server.handleMessage({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "ada" } },
+      });
+      assert.ok(response && "result" in response);
+
+      const written = readdirSync(traceDir);
+      assert.equal(written.length, 1, `expected one trace file, got ${written.join(", ")}`);
+
+      const parsed = JSON.parse(readFileSync(join(traceDir, written[0]!), "utf8")) as OTelTraceExport;
+      const rootSpan = parsed.resourceSpans[0]!.scopeSpans[0]!.spans[0]!;
+      const methodAttr = rootSpan.attributes.find((a: { key: string }) => a.key === ATTR.MCP_METHOD_NAME);
+      const toolAttr = rootSpan.attributes.find((a: { key: string }) => a.key === ATTR.MCP_TOOL_NAME);
+      assert.equal(methodAttr?.value.stringValue, "tools/call");
+      assert.equal(toolAttr?.value.stringValue, "greet");
+      assert.equal(rootSpan.status.code, SPAN_STATUS.OK);
+    } finally {
+      if (prevTraceDir === undefined) delete process.env.CAPSULE_TRACE_DIR;
+      else process.env.CAPSULE_TRACE_DIR = prevTraceDir;
+    }
+  });
+});
+
+test("writeTrace passes mcp options through to the written file", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const paths = sidecarPaths(capsule.file);
+    const runId = randomUUID();
+
+    await invokeTool({
+      capsule,
+      tool: "greet",
+      args: { name: "ada" },
+      runId,
+      journalPath: paths.journal,
+      statePath: paths.app,
+    });
+
+    const traceDir = join(home, "explicit-traces");
+    const journal = openJournal(paths.journal);
+    try {
+      const outPath = writeTrace({ journal, runId, traceDir, mcp: { method: "tools/call", tool: "greet" } });
+      assert.equal(outPath, join(traceDir, `${runId}.otlp.json`));
+
+      const parsed = JSON.parse(readFileSync(outPath!, "utf8")) as OTelTraceExport;
+      const rootSpan = parsed.resourceSpans[0]!.scopeSpans[0]!.spans[0]!;
+      assert.equal(
+        rootSpan.attributes.find((a: { key: string }) => a.key === ATTR.MCP_TOOL_NAME)?.value.stringValue,
+        "greet",
+      );
+    } finally {
+      journal.close();
     }
   });
 });
@@ -426,8 +496,10 @@ test("startSpan, endSpan, and writeTrace helpers operate correctly", async () =>
   assert.equal(draft.kind, SPAN_KIND.CLIENT);
   assert.equal(draft.traceId, "4bf92f3577b34da6a3ce929d0e0e4736");
 
-  const span = endSpan(draft, { status: { code: STATUS_CODE.OK } });
+  const span = endSpan(draft, { status: { code: SPAN_STATUS.OK } });
   assert.equal(span.name, "test_span");
-  assert.equal(span.status.code, STATUS_CODE.OK);
+  assert.equal(span.status.code, SPAN_STATUS.OK);
+  assert.equal(SPAN_STATUS.OK, 0);
+  assert.equal(SPAN_STATUS.ERROR, 2);
   assert.ok(BigInt(span.endTimeUnixNano) >= BigInt(span.startTimeUnixNano));
 });

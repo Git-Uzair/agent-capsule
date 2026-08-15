@@ -231,6 +231,7 @@ export async function handleToolsCall(
     journalPath: ctx.journalPath,
     homeDir: ctx.homeDir,
     traceparent: meta?.traceparent,
+    mcp: { method: "tools/call", tool: name },
   });
 
   if (res.ok) {
