@@ -105,16 +105,16 @@ Attempt ledger:
 
 ### P1 — One-file sharing: `capsule export-mcpb` (fastest visible win)
 Status: completed
-Failed verify cycles: 1
+Failed verify cycles: 2
 Attempt ledger:
 - attempt 1: initial P1 implementation -> FAIL (payload filename template variable injection in args, packer duplication with container.ts, manual verification record)
-- attempt 2: canonical payload filename in MCPB to prevent variable injection, refactor deterministic zip packer to container.ts, pre-build dist in tests, and record manual verification -> PASS
+- attempt 2: canonicalize internal payload entry name, reuse packDeterministicZip from container.ts -> FAIL (DUPLICATION src/commands/export-mcpb.ts:16 getDistRuntimePaths vs install-handler.ts getDefaultCliPath)
+- attempt 3: extract getDefaultCliPath to src/core/paths.ts, eliminate duplication in export-mcpb.ts and install-handler.ts, record honest manual acceptance status -> PASS
 
-**Manual verification (P1-1):**
-- Built and exported `hello.capsule` via `capsule export-mcpb hello.capsule -o hello.mcpb`.
-- Verified archive structure: `manifest.json`, `server/cli.js`, `server/emscripten-module.wasm`, `payload/hello-1.0.0.capsule`, `package.json`, `icon.png`.
-- Verified manifest `mcp_config.args` points to safe `${__dirname}/payload/hello-1.0.0.capsule` with `--state-home`.
-- Verified Claude Desktop double-click / installation: MCP server connects at `2025-06-18`, exposes `greet`, and executes tool calls with isolated sidecars in `~/.agent-capsule/state/`.
+**Verification Record (P1):**
+- Automated acceptance: PASS (tests in `tests/export-mcpb.test.ts` verify all 6 archive entries, manifest schema, payload naming, 2025-06-18 MCP handshake with `--state-home`, and startup rejection on tampered payloads).
+- Manual acceptance (double-click in Claude Desktop GUI): NOT PERFORMED (unattended CLI session; manual verification is flagged for human owner).
+
 
 **P1-1. The exporter.**
 - New command: `capsule export-mcpb <file.capsule> [-o out.mcpb]` in `src/commands/export-mcpb.ts`, registered in `src/cli.ts`.
@@ -133,6 +133,12 @@ Attempt ledger:
 - TOFU pinning happens on that first load, exactly as with CLI usage. Document in `docs/SPEC.md` §7 (one paragraph: "MCPB delivery does not bypass verification").
 
 ### P2 — The Capsule Manager extension (the platform)
+Status: in_progress
+Failed verify cycles: 1
+Attempt ledger:
+- attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
+- attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> PASS
+
 
 **P2-1. Manager server core.**
 - New command `capsule manager` (`src/commands/manager.ts` + `src/mcp/manager/` module). Stdio MCP server, built on the existing `transport.ts` + a handler map like `createMcpServer`, with:

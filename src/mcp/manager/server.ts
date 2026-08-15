@@ -135,8 +135,9 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       const loaded = await getLoadedCapsule(capsuleId, entry.file);
       if (!loaded) continue;
 
+      const allowSuspicious = opts.allowSuspicious === true || entry.allowSuspicious === true;
       const capsuleTools = buildToolList(loaded.manifest, {
-        allowSuspicious: opts.allowSuspicious === true,
+        allowSuspicious,
         warn,
       });
 
@@ -235,37 +236,35 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
         };
       }
 
-      // Future stubs (P2-4)
-      return {
-        resultType: "complete",
-        content: [{ type: "text", text: `${fullName} is supported in Phase P2-4.` }],
-        isError: false,
-        _meta: { ...resultMeta },
-      };
+      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `unknown manager tool: ${fullName}`);
     }
 
     // Gateway dispatched tools: <capsuleName>__<toolName>
     if (fullName.includes("__")) {
-      const idx = fullName.indexOf("__");
-      const capsuleName = fullName.slice(0, idx);
-      const innerToolName = fullName.slice(idx + 2);
-
       const store = loadInstalledStore(opts.homeDir);
       let targetEntry: InstalledEntry | undefined;
       let targetCapsuleId: string | undefined;
+      let innerToolName: string | undefined;
+      let matchedCapsuleName: string | undefined;
 
+      // Find installed capsule whose prefix matches `entry.name + "__"`
+      // Prefer longest matching name in case of nested/overlapping names
       for (const [cid, entry] of Object.entries(store.capsules)) {
-        if (entry.name === capsuleName) {
-          targetEntry = entry;
-          targetCapsuleId = cid;
-          break;
+        const prefix = `${entry.name}__`;
+        if (fullName.startsWith(prefix)) {
+          if (matchedCapsuleName === undefined || entry.name.length > matchedCapsuleName.length) {
+            matchedCapsuleName = entry.name;
+            targetEntry = entry;
+            targetCapsuleId = cid;
+            innerToolName = fullName.slice(prefix.length);
+          }
         }
       }
 
-      if (!targetEntry || !targetCapsuleId) {
+      if (!targetEntry || !targetCapsuleId || innerToolName === undefined || innerToolName === "") {
         throw new RpcFailure(
           JSON_RPC_ERROR.InvalidParams,
-          `unknown tool: capsule '${capsuleName}' is not installed`,
+          `unknown tool: ${sanitizeModelText(fullName, 120)}`,
         );
       }
 
@@ -273,12 +272,13 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       if (!loaded) {
         throw new RpcFailure(
           JSON_RPC_ERROR.InvalidParams,
-          `failed to load capsule '${capsuleName}'`,
+          `failed to load capsule '${targetEntry.name}'`,
         );
       }
 
+      const allowSuspicious = opts.allowSuspicious === true || targetEntry.allowSuspicious === true;
       const servedTools = buildToolList(loaded.manifest, {
-        allowSuspicious: opts.allowSuspicious === true,
+        allowSuspicious,
         warn,
       });
 
@@ -286,7 +286,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       if (!toolServed) {
         throw new RpcFailure(
           JSON_RPC_ERROR.InvalidParams,
-          `tool '${innerToolName}' is not served by capsule '${capsuleName}'`,
+          `tool '${innerToolName}' is not served by capsule '${targetEntry.name}'`,
         );
       }
 

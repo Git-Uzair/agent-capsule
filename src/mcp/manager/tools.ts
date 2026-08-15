@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { asRecord } from "../../core/canonical.ts";
 import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
-import type { CatalogTool } from "../catalog.ts";
+import { buildToolList, type CatalogTool } from "../catalog.ts";
 import { declaredCapabilities } from "../server.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
 import { scanTextTree } from "../../security/text.ts";
@@ -74,66 +74,6 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
     inputSchema: {
       type: "object",
       properties: {},
-    },
-    effects: [],
-  },
-  {
-    name: "capsule_create",
-    title: "Create Capsule",
-    description: "Create and sign a new Agent Capsule from specification and guest source code (P2-4).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string" },
-        title: { type: "string" },
-        description: { type: "string" },
-        source: { type: "string" },
-        tools: { type: "array" },
-      },
-      required: ["name", "title", "description", "source", "tools"],
-    },
-    effects: [],
-  },
-  {
-    name: "capsule_update",
-    title: "Update Capsule",
-    description: "Update an existing Agent Capsule with new source or tools (P2-4).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        capsuleId: { type: "string" },
-        source: { type: "string" },
-        tools: { type: "array" },
-      },
-      required: ["capsuleId"],
-    },
-    effects: [],
-  },
-  {
-    name: "capsule_open_ui",
-    title: "Open Capsule UI",
-    description: "Launch the local UI server for an installed capsule (P2-4).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        capsuleId: { type: "string" },
-        name: { type: "string" },
-      },
-    },
-    effects: [],
-  },
-  {
-    name: "capsule_test_tool",
-    title: "Test Capsule Tool",
-    description: "Execute a tool inside an installed capsule for testing and diagnostics (P2-4).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        capsuleId: { type: "string" },
-        tool: { type: "string" },
-        args: { type: "object" },
-      },
-      required: ["capsuleId", "tool"],
     },
     effects: [],
   },
@@ -226,25 +166,24 @@ export async function handleCapsuleInstall(
   }
 
   // Screen for suspicious prompt injection markers or identifiers
-  const suspiciousMarkers: string[] = [];
-  for (const tool of loaded.manifest.tools) {
-    const markers = scanTextTree([tool.title, tool.description, tool.inputSchema, tool.outputSchema]);
-    if (markers.length > 0) {
-      suspiciousMarkers.push(`tool '${tool.name}': ${markers.join(", ")}`);
-    }
-  }
+  const screeningWarnings: string[] = [];
+  buildToolList(loaded.manifest, {
+    allowSuspicious: false,
+    warn: (line) => screeningWarnings.push(line),
+  });
+
   const metaMarkers = scanTextTree([loaded.manifest.meta.title, loaded.manifest.meta.description]);
   if (metaMarkers.length > 0) {
-    suspiciousMarkers.push(`metadata: ${metaMarkers.join(", ")}`);
+    screeningWarnings.push(`metadata: ${metaMarkers.join(", ")}`);
   }
 
-  if (suspiciousMarkers.length > 0 && !allowSuspicious) {
+  if (screeningWarnings.length > 0 && !allowSuspicious) {
     const text =
-      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${suspiciousMarkers.join("; ")}). ` +
+      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${screeningWarnings.join("; ")}). ` +
       `To install anyway, re-run capsule_install with { path: "${targetFile}", allow_suspicious: true }.`;
     return {
       text,
-      structured: { ok: false, error: "E_SUSPICIOUS", findings: suspiciousMarkers, message: text },
+      structured: { ok: false, error: "E_SUSPICIOUS", findings: screeningWarnings, message: text },
       isError: true,
     };
   }
@@ -260,6 +199,7 @@ export async function handleCapsuleInstall(
       version: loaded.manifest.meta.version,
       file: destPath,
       installedAt: new Date().toISOString(),
+      ...(allowSuspicious ? { allowSuspicious: true } : {}),
     },
     opts.homeDir,
   );
@@ -268,7 +208,11 @@ export async function handleCapsuleInstall(
   opts.notifyListChanged();
 
   const caps = declaredCapabilities(loaded.manifest);
-  const gatewayTools = loaded.manifest.tools.map((t) => `${loaded.manifest.meta.name}__${t.name}`);
+  const servedTools = buildToolList(loaded.manifest, {
+    allowSuspicious,
+    warn: opts.warn,
+  });
+  const gatewayTools = servedTools.map((t) => `${loaded.manifest.meta.name}__${t.name}`);
   const text =
     `Installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.\n` +
     `• Capsule ID: ${loaded.capsuleId}\n` +
@@ -357,8 +301,16 @@ export async function handleCapsuleList(opts: {
 
   for (const [capsuleId, entry] of entries) {
     const loaded = await opts.getCapsule(capsuleId, entry.file);
-    const tools = loaded ? loaded.manifest.tools.map((t) => `${loaded.manifest.meta.name}__${t.name}`) : [];
+    const served = loaded
+      ? buildToolList(loaded.manifest, {
+          allowSuspicious: entry.allowSuspicious === true,
+          warn: () => {},
+        })
+      : [];
+    const tools = served.map((t) => `${entry.name}__${t.name}`);
     const caps = loaded ? declaredCapabilities(loaded.manifest) : "unknown";
+    const trust = loaded?.trust ?? "corrupt";
+
     capsulesInfo.push({
       capsuleId,
       name: entry.name,
@@ -366,14 +318,21 @@ export async function handleCapsuleList(opts: {
       file: entry.file,
       installedAt: entry.installedAt,
       publisherKey: loaded?.keyId ?? "unknown",
-      trust: loaded?.trust ?? "ok",
+      trust,
       capabilities: caps,
       tools,
     });
-    lines.push(`• ${entry.name}@${entry.version} (id: ${capsuleId})`);
-    lines.push(`  - Installed: ${entry.installedAt}`);
-    lines.push(`  - Capabilities: ${caps}`);
-    lines.push(`  - Tools: ${tools.length > 0 ? tools.join(", ") : "none"}`);
+    if (loaded) {
+      lines.push(`• ${entry.name}@${entry.version} (id: ${capsuleId})`);
+      lines.push(`  - Installed: ${entry.installedAt}`);
+      lines.push(`  - Capabilities: ${caps}`);
+      lines.push(`  - Tools: ${tools.length > 0 ? tools.join(", ") : "none"}`);
+    } else {
+      lines.push(`• ${entry.name}@${entry.version} (id: ${capsuleId}) [CORRUPT/UNVERIFIABLE]`);
+      lines.push(`  - Installed: ${entry.installedAt}`);
+      lines.push(`  - Trust: ${trust}`);
+      lines.push(`  - File: ${entry.file} (failed to load or verify)`);
+    }
   }
 
   const text = lines.join("\n");

@@ -9,6 +9,7 @@ export type InstalledEntry = {
   version: string;
   file: string;
   installedAt: string;
+  allowSuspicious?: boolean;
 };
 
 export type InstalledStore = {
@@ -38,7 +39,8 @@ function isInstalledEntry(value: unknown): value is InstalledEntry {
     typeof e["name"] === "string" &&
     typeof e["version"] === "string" &&
     typeof e["file"] === "string" &&
-    typeof e["installedAt"] === "string"
+    typeof e["installedAt"] === "string" &&
+    (e["allowSuspicious"] === undefined || typeof e["allowSuspicious"] === "boolean")
   );
 }
 
@@ -58,6 +60,7 @@ export function loadInstalledStore(homeDir: string = capsuleHome()): InstalledSt
           version: value.version,
           file: value.file,
           installedAt: value.installedAt,
+          ...(value.allowSuspicious === true ? { allowSuspicious: true } : {}),
         };
       },
     }),
@@ -74,6 +77,19 @@ export function addInstalledCapsule(
   homeDir: string = capsuleHome(),
 ): void {
   const store = loadInstalledStore(homeDir);
+  // If an existing capsule with the same name exists, clean it up so the updated version is actively served
+  for (const [existingId, existingEntry] of Object.entries(store.capsules)) {
+    if (existingEntry.name === entry.name && existingId !== capsuleId) {
+      delete store.capsules[existingId];
+      if (existingEntry.file && existingEntry.file !== entry.file && existsSync(existingEntry.file)) {
+        try {
+          unlinkSync(existingEntry.file);
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+    }
+  }
   store.capsules[capsuleId] = entry;
   saveInstalledStore(store, homeDir);
 }
