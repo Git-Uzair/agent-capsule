@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { join } from "node:path";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
-import { startUiServer, type UiServer } from "../src/ui/server.ts";
+import { allowedHosts, startUiServer, type UiServer } from "../src/ui/server.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
 const PAGE = readFileSync(join(FIXTURE, "ui", "index.html"), "utf8");
@@ -223,6 +223,38 @@ test("rejects a foreign Host header and a cross-site fetch", async () => {
       });
       assert.equal(crossSite.status, 403);
     });
+  });
+});
+
+test("accepts a port-less Host header on the default port 80", async () => {
+  // The table is asserted directly as well as over the wire: binding port 80 needs a privilege (or a
+  // free port 80) that not every machine running this suite has, and the rule this test exists for
+  // must be proven either way.
+  assert.deepEqual(allowedHosts(80), ["127.0.0.1:80", "localhost:80", "127.0.0.1", "localhost"]);
+  assert.deepEqual(allowedHosts(8080), ["127.0.0.1:8080", "localhost:8080"]);
+
+  await withHome(async (home) => {
+    const capsule = await packCapsule(home);
+    let ui: UiServer;
+    try {
+      ui = await startUiServer({ capsule, homeDir: home, port: 80 });
+    } catch (err) {
+      // EACCES (unprivileged) or EADDRINUSE (something else owns it): the wire half is not available
+      // here, and a suite that failed for that would be testing the machine.
+      assert.match(String(err), /EACCES|EADDRINUSE|EPERM/, `unexpected failure binding port 80: ${String(err)}`);
+      return;
+    }
+    try {
+      // What a browser actually sends for `http://127.0.0.1/`: no port, because 80 is the default.
+      assert.equal((await raw({ port: 80, path: `/?t=${ui.token}`, host: "127.0.0.1" })).status, 200);
+      assert.equal((await raw({ port: 80, path: `/?t=${ui.token}`, host: "localhost" })).status, 200);
+      assert.equal((await raw({ port: 80, path: `/?t=${ui.token}`, host: "127.0.0.1:80" })).status, 200);
+      // Another port and another name are still other origins.
+      assert.equal((await raw({ port: 80, path: `/?t=${ui.token}`, host: "127.0.0.1:81" })).status, 403);
+      assert.equal((await raw({ port: 80, path: `/?t=${ui.token}`, host: "evil.test" })).status, 403);
+    } finally {
+      await ui.close();
+    }
   });
 });
 

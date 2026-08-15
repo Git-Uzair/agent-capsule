@@ -20,6 +20,18 @@ const MAX_BODY_BYTES = 64 * 1024;
 const DEFAULT_IDLE_MS = 30 * 60 * 1000;
 
 /**
+ * The `Host` values that name *this* server, for the DNS-rebinding check. A browser leaves the port
+ * out of `Host` when it is the scheme's default, so on port 80 `127.0.0.1` and `localhost` are the
+ * same origin as `127.0.0.1:80` — spelling, not a rebinding attempt. On any other port a port-less
+ * `Host` names a different origin and stays refused.
+ */
+export function allowedHosts(port: number): string[] {
+  return port === 80
+    ? [`${HOST}:80`, "localhost:80", HOST, "localhost"]
+    : [`${HOST}:${port}`, `localhost:${port}`];
+}
+
+/**
  * Container entries the static route may serve, by name, exactly as `ui/**` and nothing else. The
  * character class is the container's own (`assertLegalPath`), so a name this accepts is a name the
  * container could hold — and `%2e%2e`, a backslash or a space fail the pattern before any lookup.
@@ -460,7 +472,7 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     const query = new URLSearchParams(mark === -1 ? "" : target.slice(mark + 1));
 
     const host = (req.headers.host ?? "").toLowerCase();
-    if (host !== `${HOST}:${boundPort}` && host !== `localhost:${boundPort}`) {
+    if (!allowedHosts(boundPort).includes(host)) {
       return refuse(res, 403, "forbidden");
     }
 
