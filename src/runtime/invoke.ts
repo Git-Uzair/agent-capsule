@@ -7,6 +7,7 @@ import type { LoadedCapsule } from "../format/capsule.ts";
 import type { GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
 import { createEffects, type EffectsController } from "./effects.ts";
+import { createFetchPort, type FetchInit } from "./fetch.ts";
 import { runGuest } from "./guest.ts";
 import { EVENT, openJournal, type Journal } from "./journal.ts";
 import { buildPolicy, type Policy } from "./policy.ts";
@@ -230,6 +231,16 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     });
     journal.append(runId, EVENT.toolAuthorized, { tool: tool.name, grants: policy.requiredGrants(tool.name) });
 
+    // The egress gate, built here because it needs this capsule's own `allow_localhost` and this
+    // tool's name — the policy answers "may *this* tool reach *that* host". A caller may inject its
+    // own port (tests, replay), and a caller that does not gets the real one: net.fetch is never
+    // silently unavailable to a capsule whose manifest declared it.
+    const fetchPort = createFetchPort({
+      policy,
+      tool: tool.name,
+      allowLocalhost: capsule.manifest.capabilities.net.allow_localhost,
+    });
+
     effects = createEffects({
       policy,
       journal,
@@ -239,7 +250,9 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
       state,
       ...(opts.clock === undefined ? {} : { clock: opts.clock }),
       ...(opts.randomBytes === undefined ? {} : { randomBytes: opts.randomBytes }),
-      ...(opts.netFetch === undefined ? {} : { netFetch: opts.netFetch }),
+      // The guest's `init` is whatever JSON it built, so it crosses as `unknown`; the port checks
+      // every field of it before any of it can reach a socket.
+      netFetch: opts.netFetch ?? ((url, init): Promise<unknown> => fetchPort(url, init as FetchInit | undefined)),
       ...(opts.packWrite === undefined ? {} : { packWrite: opts.packWrite }),
     });
 
