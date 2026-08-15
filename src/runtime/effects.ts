@@ -58,14 +58,22 @@ function sqlParams(params: unknown, op: EffectName): unknown[] {
 /**
  * The one hole in the sandbox. Every non-deterministic thing a capsule can do goes through
  * `dispatch`, which is why the same function both records and replays: in record mode it runs the op
- * and writes the answer into the journal, in replay mode it reads the answer back and runs nothing.
- * A replay that asks a different question in a different order is a divergence, not a new recording.
+ * and writes the answer into the journal, in replay mode it reads the answer back and runs only the
+ * effects the recording shows failing. A replay that asks a different question in a different order
+ * is a divergence, not a new recording.
  */
 export function createEffects(opts: EffectsOptions): EffectsController {
   const { policy, journal, runId, tool, mode, recorded = [], state } = opts;
   const clock = opts.clock ?? ((): string => new Date().toISOString());
   const randomHex = opts.randomBytes ?? ((n: number): string => cryptoRandomBytes(n).toString("hex"));
   let next = 0;
+
+  // A recorded effect is found by its ordinal, never by its position: `journal.effects()` lists
+  // completed effects only, so an effect that failed leaves a gap and the two stop agreeing after
+  // the first failure. `lastOrdinal` is where the recording ends, which is what tells a gap (an
+  // effect that ran and failed) apart from a replay that has run past the end of the recording.
+  const byOrdinal = new Map(recorded.map((r) => [r.i, r]));
+  const lastOrdinal = recorded.reduce((max, r) => Math.max(max, r.i), -1);
 
   const needState = (op: EffectName): CapsuleState => state ?? usage(`${op} requires capsule state`, { op });
 
@@ -140,13 +148,16 @@ export function createEffects(opts: EffectsOptions): EffectsController {
 
     let value: unknown;
     let ms: number | undefined;
-    if (mode === "record") {
+    const previous = byOrdinal.get(i);
+    if (mode === "record" || (previous === undefined && i < lastOrdinal)) {
+      // Record, or the replay of an ordinal the recording never completed: run the op and let it
+      // fail the way it failed then. A trailing failure cannot be told from a divergence — the
+      // recording simply ends — so it is reported as one, below.
       const started = performance.now();
       value = await handlers[op](params);
       // Bucketed to 10 ms: a real duration in the payload would make the hash chain unreproducible.
-      ms = Math.round((performance.now() - started) / 10) * 10;
+      if (mode === "record") ms = Math.round((performance.now() - started) / 10) * 10;
     } else {
-      const previous = recorded[i];
       if (previous === undefined || previous.op !== op || previous.paramsDigest !== paramsDigest) {
         throw new CapsuleError(
           "E_NONDETERMINISM",

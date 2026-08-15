@@ -51,6 +51,8 @@ const LOCAL = manifestWith({ kv: true, sql: true }, ALL_LOCAL);
 
 type Ctx = {
   journal: Journal;
+  /** The journal's own file, so a test can try to reach the evidence the way a guest would. */
+  journalPath: string;
   state: CapsuleState;
   /** A controller bound to a fresh run, so record and replay never share an ordinal counter. */
   effects(opts: {
@@ -78,6 +80,7 @@ async function withRun(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
   try {
     await fn({
       journal,
+      journalPath,
       state,
       effects(opts) {
         const manifest = opts.manifest ?? LOCAL;
@@ -242,7 +245,7 @@ test("enforces per-op limits", async () => {
 
     await assert.rejects(
       () => controller.dispatch("greet", "kv.set", { key: "k", value: "x".repeat(65 * 1024) }),
-      capsuleError("E_USAGE", /kv value exceeds 65536 characters/),
+      capsuleError("E_USAGE", /kv value exceeds 65536 bytes/),
     );
     await assert.rejects(
       () => controller.dispatch("greet", "kv.get", { key: "k".repeat(257) }),
@@ -288,7 +291,8 @@ test("blocks ATTACH and PRAGMA in sql.exec", async () => {
     ]) {
       await assert.rejects(() => controller.dispatch("greet", "sql.exec", { sql }), blocked);
     }
-    assert.deepEqual(state.sqlQuery("PRAGMA database_list").length, 1);
+    // `PRAGMA` is refused through the ports as well, so the probe uses the host's own handle.
+    assert.equal(state.roDb.prepare("PRAGMA database_list").all().length, 1);
 
     // Ordinary statements still work, and the read-only handle refuses to write.
     assert.deepEqual(await controller.dispatch("greet", "sql.exec", { sql: "CREATE TABLE t (a TEXT)" }), {
@@ -303,6 +307,106 @@ test("blocks ATTACH and PRAGMA in sql.exec", async () => {
     const rows = (await controller.dispatch("greet", "sql.query", { sql: "SELECT a FROM t" })) as object[];
     assert.deepEqual(rows.map((row) => ({ ...row })), [{ a: "x" }]);
     await assert.rejects(() => controller.dispatch("greet", "sql.query", { sql: "DELETE FROM t" }), /readonly/);
+  });
+});
+
+/**
+ * A leading `;` is an empty statement SQLite skips, so a keyword check that only tolerates comments
+ * is no check at all: both sql ports must find the first real token whatever precedes it.
+ */
+test("blocks disallowed statements hidden behind semicolons and comments", async () => {
+  await withRun(async ({ effects, journalPath, state }) => {
+    const { controller } = effects({ mode: "record" });
+    const hidden = [
+      ";ATTACH DATABASE 'evil.sqlite' AS evil",
+      "\n;VACUUM",
+      ";PRAGMA user_version=42",
+      ";; -- x\n/* y */ ;attach database 'evil.sqlite' as evil",
+      // The journal is a plain file on disk, so the read-only handle must refuse to link it in.
+      `;ATTACH DATABASE '${journalPath}' AS j`,
+      `/* j */ATTACH DATABASE '${journalPath}' AS j`,
+    ];
+    for (const sql of hidden) {
+      await assert.rejects(
+        () => controller.dispatch("greet", "sql.exec", { sql }),
+        capsuleError("E_POLICY", /^sql\.exec disallows ATTACH\/PRAGMA\/VACUUM$/),
+      );
+      await assert.rejects(
+        () => controller.dispatch("greet", "sql.query", { sql }),
+        capsuleError("E_POLICY", /^sql\.query disallows ATTACH\/PRAGMA\/VACUUM$/),
+      );
+    }
+    // Nothing got attached and nothing got reconfigured, on either handle.
+    for (const handle of [state.db, state.roDb]) {
+      assert.equal(handle.prepare("PRAGMA database_list").all().length, 1);
+      assert.deepEqual({ ...(handle.prepare("PRAGMA user_version").get() as object) }, { user_version: 0 });
+    }
+  });
+});
+
+test("kv value limit is measured in bytes, not UTF-16 units", async () => {
+  await withRun(async ({ effects, state }) => {
+    const { controller } = effects({ mode: "record" });
+    // 30 000 euro signs are 30 000 UTF-16 units but 90 000 bytes: the budget is bytes.
+    await assert.rejects(
+      () => controller.dispatch("greet", "kv.set", { key: "euro", value: "\u20AC".repeat(30_000) }),
+      capsuleError("E_USAGE", /^kv value exceeds 65536 bytes$/),
+    );
+    assert.equal(state.kvGet("euro"), null);
+    // A multi-byte value that fits the byte budget is still accepted (21 845 × 3 = 65 535 bytes).
+    const fits = "\u20AC".repeat(21_845);
+    assert.equal(await controller.dispatch("greet", "kv.set", { key: "euro", value: fits }), true);
+    assert.equal(state.kvGet("euro"), fits);
+  });
+});
+
+/**
+ * A failed effect consumes an ordinal but writes no completion, so the recording has a gap and
+ * `recorded[i]` is not effect `i`. Replay is keyed on the ordinal: recorded ordinals are returned
+ * verbatim, and a gap is executed so it fails exactly as it did in the recording.
+ */
+test("replays a run in which an effect failed", async () => {
+  await withRun(async ({ journal, state, effects }) => {
+    const oversized = { key: "big", value: "\u20AC".repeat(30_000) };
+    const record = effects({ mode: "record" });
+    assert.equal(await record.controller.dispatch("greet", "kv.set", { key: "a", value: "1" }), true);
+    await assert.rejects(
+      () => record.controller.dispatch("greet", "kv.set", oversized),
+      capsuleError("E_USAGE", /^kv value exceeds 65536 bytes$/),
+    );
+    assert.equal(await record.controller.dispatch("greet", "kv.get", { key: "a" }), "1");
+    assert.equal(record.controller.count(), 3);
+
+    const recorded = journal.effects(record.runId);
+    assert.deepEqual(
+      recorded.map((e) => [e.i, e.op, e.value]),
+      [
+        [0, "kv.set", true],
+        [2, "kv.get", "1"],
+      ],
+    );
+
+    // With the row gone, an executed `kv.get` would answer `null`: "1" can only come from the
+    // recording, which is how the test tells replayed values from re-executed ones.
+    state.sqlExec("DELETE FROM kv");
+    const replay = effects({ mode: "replay", recorded });
+    assert.equal(await replay.controller.dispatch("greet", "kv.set", { key: "a", value: "1" }), true);
+    await assert.rejects(
+      () => replay.controller.dispatch("greet", "kv.set", oversized),
+      capsuleError("E_USAGE", /^kv value exceeds 65536 bytes$/),
+    );
+    assert.equal(await replay.controller.dispatch("greet", "kv.get", { key: "a" }), "1");
+    assert.equal(state.kvGet("a"), null);
+
+    // Same ordinals, same values, same gap as the recording, minus the timings.
+    assert.deepEqual(
+      journal.effects(replay.runId),
+      recorded.map(({ ms, ...rest }) => {
+        void ms;
+        return rest;
+      }),
+    );
+    assert.doesNotThrow(() => journal.verifyChain(replay.runId));
   });
 });
 

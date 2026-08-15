@@ -5,7 +5,7 @@ import { CapsuleError } from "../core/errors.ts";
 
 /** Hard limits on what a guest can store or read back in one go. */
 const MAX_KEY_CHARS = 256;
-const MAX_VALUE_CHARS = 64 * 1024;
+const MAX_VALUE_BYTES = 64 * 1024;
 const MAX_KV_ROWS = 10_000;
 const MAX_QUERY_ROWS = 1000;
 const MAX_QUERY_BYTES = 1024 * 1024;
@@ -15,8 +15,13 @@ const DISALLOWED = new Set(["ATTACH", "DETACH", "PRAGMA", "VACUUM"]);
 
 const SCHEMA = "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)";
 
-/** Comments are stripped before the keyword is read, so a commented-out prefix hides nothing. */
-const COMMENTS = /--[^\n]*|\/\*[\s\S]*?\*\//g;
+/**
+ * Everything SQLite skips before the first token of the first real statement: whitespace, comments
+ * in either syntax, and empty statements (`;`). Anything left unstripped here is a bypass, so the
+ * class is deliberately greedy — over-stripping can only make the keyword check fire more often,
+ * and a statement SQLite itself cannot tokenise fails at `prepare` anyway.
+ */
+const LEADING_NOISE = /^(?:\s|;|--[^\n]*|\/\*[\s\S]*?\*\/)+/;
 
 export type CapsuleState = {
   db: DatabaseSync;
@@ -39,7 +44,18 @@ function assertKey(key: string): void {
 }
 
 function leadingKeyword(sql: string): string {
-  return /^\s*([a-z_]+)/i.exec(sql.replace(COMMENTS, " "))?.[1]?.toUpperCase() ?? "";
+  return /^[a-z_]+/i.exec(sql.replace(LEADING_NOISE, ""))?.[0]?.toUpperCase() ?? "";
+}
+
+/**
+ * Both ports share this gate. The journal being a separate file is not isolation on its own: any
+ * connection can `ATTACH` it back in, and a read-only handle refuses writes, not attachments.
+ */
+function assertAllowed(op: "sql.query" | "sql.exec", sql: string): void {
+  const keyword = leadingKeyword(sql);
+  if (DISALLOWED.has(keyword)) {
+    throw new CapsuleError("E_POLICY", `${op} disallows ATTACH/PRAGMA/VACUUM`, { keyword });
+  }
 }
 
 function bind(params: unknown[] | undefined): SQLInputValue[] {
@@ -47,9 +63,11 @@ function bind(params: unknown[] | undefined): SQLInputValue[] {
 }
 
 /**
- * Guest state lives in its own file, separate from the journal, so the guest can never touch the
- * evidence and protecting the journal needs no SQL parsing at all. Two handles on that one file:
- * `sql.query` gets the read-only one, so SQLite itself refuses a write dressed up as a query.
+ * Guest state lives in its own file, separate from the journal, so ordinary statements can never
+ * name the evidence. That separation is defence in depth, not the whole defence: `ATTACH` would
+ * link the journal into the guest's connection, so both ports also reject the statements that
+ * reach outside the file or reconfigure it. Two handles on that one file: `sql.query` gets the
+ * read-only one, so SQLite itself refuses a write dressed up as a query.
  */
 export function openState(appDbPath: string): CapsuleState {
   mkdirSync(dirname(appDbPath), { recursive: true });
@@ -75,8 +93,11 @@ export function openState(appDbPath: string): CapsuleState {
 
     kvSet(key, value) {
       assertKey(key);
-      if (value.length > MAX_VALUE_CHARS) {
-        usage(`kv value exceeds ${MAX_VALUE_CHARS} characters`, { key, length: value.length });
+      // The budget is storage, so it is counted in UTF-8 bytes: `value.length` is UTF-16 units and
+      // lets a multi-byte value store three times the limit.
+      const bytes = Buffer.byteLength(value, "utf8");
+      if (bytes > MAX_VALUE_BYTES) {
+        usage(`kv value exceeds ${MAX_VALUE_BYTES} bytes`, { key, bytes });
       }
       // A full table may still be updated in place; only new keys are refused.
       if (kvGet(key) === null && ((countRows.get() as { n: number }).n >= MAX_KV_ROWS)) {
@@ -86,6 +107,7 @@ export function openState(appDbPath: string): CapsuleState {
     },
 
     sqlQuery(sql, params) {
+      assertAllowed("sql.query", sql);
       const rows = roDb.prepare(sql).all(...bind(params));
       if (rows.length > MAX_QUERY_ROWS) {
         usage(`sql.query returned more than ${MAX_QUERY_ROWS} rows`, { rows: rows.length });
@@ -96,10 +118,7 @@ export function openState(appDbPath: string): CapsuleState {
     },
 
     sqlExec(sql, params) {
-      const keyword = leadingKeyword(sql);
-      if (DISALLOWED.has(keyword)) {
-        throw new CapsuleError("E_POLICY", "sql.exec disallows ATTACH/PRAGMA/VACUUM", { keyword });
-      }
+      assertAllowed("sql.exec", sql);
       // `prepare` compiles the first statement only, so the keyword check cannot be bypassed by
       // appending a second one.
       return { changes: Number(db.prepare(sql).run(...bind(params)).changes) };
