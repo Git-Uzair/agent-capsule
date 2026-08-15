@@ -175,6 +175,11 @@ function unwrap(envelope: string | undefined, tool: string): unknown {
 export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
   const argsJson = serialiseArgs(opts.args, opts.tool);
 
+  // The host's exit status is not the guest's to write. Recursion that suspends the interpreter at
+  // every frame exhausts the host's own stack, and the WASM module's node hook records that as the
+  // process's exit status on its way out — a status that would then outlive this call and make every
+  // later command in the process report failure. It is put back exactly as it was found.
+  const priorExitCode = process.exitCode;
   const deadline = Date.now() + opts.runtime.timeout_ms;
   const module = await newQuickJSAsyncWASMModule();
   const context = module.newContext();
@@ -225,5 +230,7 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
   } finally {
     invoker?.dispose();
     context.dispose();
+    // Last of all: tearing down an aborted module is one more chance for that hook to fire.
+    process.exitCode = priorExitCode;
   }
 }

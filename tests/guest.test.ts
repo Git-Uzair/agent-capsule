@@ -339,6 +339,24 @@ test("a memory hog is stopped", async () => {
   );
 });
 
+test("a guest cannot set the host's exit code", async () => {
+  // Recursion that suspends the interpreter at every frame exhausts the *host's* stack rather than
+  // the guest's, and the WASM module's node hook answers that by writing the process's exit status on
+  // its way out. That status outlives the run, so without a restore one capsule decides whether every
+  // later command in this process — a passing test run included — reports success.
+  const prior = process.exitCode;
+  const source = `globalThis.tools = {
+    greet: () => { const f = () => { capsule.log("x"); return f(); }; return f(); },
+  };`;
+
+  await assert.rejects(() => run(source), capsuleError("E_GUEST"));
+  assert.equal(process.exitCode, prior);
+
+  // And the run after it is an ordinary run: the failure left nothing behind on either side.
+  assert.deepEqual(await run(`globalThis.tools = { greet: () => ({ ok: capsule.now() }) };`), { ok: CLOCK });
+  assert.equal(process.exitCode, prior);
+});
+
 test("a guest throw becomes E_GUEST with sanitised text", async () => {
   await assert.rejects(
     () =>
