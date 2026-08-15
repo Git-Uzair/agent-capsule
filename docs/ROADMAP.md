@@ -10,8 +10,8 @@
 | Milestone | Target Window | Theme | Primary Goals |
 | :--- | :--- | :--- | :--- |
 | **v0.1.0** | **Shipped (2026-08)** | Capsule Core & Verification | Deterministic ZIP format, Ed25519/JCS signing, TOFU trust, QuickJS sandbox, effect ports, hash-chained journal & replay, MCP 2026-07-28, MCP Apps, OTel tracing, Agent Plugins export. |
-| **v0.2.0** | **Q4 2026** | Enterprise Trust & Native Host Sandboxing | WASI 0.3 component model guests, OS-level host sandboxing, Sigstore keyless signing, Streamable HTTP transport, MCP Tasks extension, desktop integration. |
-| **v0.3.0** | **2027** | Distribution & Collaborative Ecosystem | Capsule Hub decentralized registry, browser-based Genesis Studio, vector capabilities (`sqlite-vec`), and multi-capsule pipelines. |
+| **v0.2.0** | **Q4 2026** | Enterprise Trust & Native Host Sandboxing | WASI 0.3 component model guests, OS-level host sandboxing, Sigstore keyless signing, Streamable HTTP transport, MCP Tasks extension, host vector capabilities (`sqlite-vec`), host `pack.write` port, desktop integration. |
+| **v0.3.0** | **2027** | Distribution & Collaborative Ecosystem | Capsule Hub decentralized registry, browser-based Genesis Studio, and multi-capsule pipelines. |
 
 ---
 

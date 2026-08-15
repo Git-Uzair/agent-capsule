@@ -535,7 +535,7 @@ test("effects are bound to the run's tool", async () => {
 });
 
 test("delegates net.fetch and pack.write to the injected ports", async () => {
-  await withRun(async ({ effects }) => {
+  await withRun(async ({ effects, journal }) => {
     const calls: unknown[] = [];
     const manifest = manifestWith({ pack: true, net: { allowed_hosts: ["api.example.com"] } }, [
       "net.fetch",
@@ -582,6 +582,19 @@ test("delegates net.fetch and pack.write to the injected ports", async () => {
       () => bare.controller.dispatch("greet", "pack.write", { dir: "src" }),
       capsuleError("E_USAGE", /^pack\.write is not available in this runtime$/),
     );
+
+    // The request is journalled before the port runs, so an unwired port leaves a request with no
+    // completion — the same shape a failed effect leaves, which is what replay reads as a gap.
+    const bareEvents = journal.events(bare.runId);
+    assert.deepEqual(
+      bareEvents.map((e) => e.type),
+      [EVENT.effectRequested, EVENT.effectRequested],
+    );
+    assert.deepEqual(bareEvents[1]?.payload, {
+      i: 1,
+      op: "pack.write",
+      paramsDigest: digestOf({ dir: "src" }),
+    });
   });
 });
 
