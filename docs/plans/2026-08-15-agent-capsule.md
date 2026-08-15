@@ -711,9 +711,10 @@ export function newValidator(): Ajv2020Type {
 
 ## Task 4 — Deterministic ZIP container (write + read)
 
-**Status:** In Progress (Failed Verify Cycles: 1)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 4 implementation -> verifier FAIL (`.` path segment, central directory uncounted entry bypass, 256-char test coverage)
+- attempt 2: reject dot segments, validate declared central directory byte coverage, test 256-char boundary path -> verifier PASS
 
 **Goal:** byte-reproducible `.capsule` containers that `unzip`/7-Zip can still open.
 **Difficulty:** HARD (path traversal + zip-bomb guards live here; everything downstream trusts it)
@@ -897,6 +898,8 @@ the version to ship. (`ReadZip` import is unused; drop it.)
 
 ## Task 5 — Payload statement (content addressing, reproducible builds)
 
+**Status:** Completed (PASS)
+
 **Goal:** turn a set of files into the one signable document that defines capsule identity.
 **Difficulty:** EASY
 **Files (new):** `src/format/statement.ts`, `tests/statement.test.ts`
@@ -943,6 +946,11 @@ container with `.capsule/statement.json`, and assert: (a) `verifyStatement` reso
 ---
 
 ## Task 6 — Ed25519 signing, keystore, and TOFU trust store
+
+**Status:** In Progress (Failed Verify Cycles: 1)
+**Attempt Ledger:**
+- attempt 1: initial Task 6 implementation -> verifier FAIL (prototype pollution / Object.prototype keys like constructor and __proto__ in trust store)
+- attempt 2: null-prototype `capsules` dictionary so `constructor`/`__proto__` are ordinary keys -> pending verify
 
 **Goal:** provenance that actually exists (0 of ~11,700 scanned MCP servers ship signed releases).
 **Difficulty:** HARD (trust decisions; get the failure modes exactly right)

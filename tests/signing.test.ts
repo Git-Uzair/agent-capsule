@@ -19,6 +19,7 @@ import {
   pinTrust,
   saveTrustStore,
   type TrustEntry,
+  type TrustStore,
 } from "../src/security/trust.ts";
 
 /** Same shape as tests/statement.test.ts: assert the machine-readable code, not the prose. */
@@ -71,6 +72,12 @@ const observedOf = (key: { publicKeyBase64: string; keyId: string }, catalog: st
 
 const CATALOG_A = "sha256:" + "1".repeat(64);
 const CATALOG_B = "sha256:" + "2".repeat(64);
+
+/** `capsules` is a null-prototype dictionary, so an empty store is not deep-equal to `{}`. */
+function assertEmptyStore(store: TrustStore): void {
+  assert.equal(store.version, 1);
+  assert.deepEqual(Object.keys(store.capsules), []);
+}
 
 test("capsuleHome honours CAPSULE_HOME", () => {
   withHome((home) => {
@@ -169,7 +176,7 @@ test("first use pins, second use matches", () => {
     const key = loadOrCreateSigningKey();
     const observed = observedOf(key, CATALOG_A);
 
-    assert.deepEqual(loadTrustStore(), { version: 1, capsules: {} });
+    assertEmptyStore(loadTrustStore());
     assert.equal(checkTrust(undefined, observed), "pinned");
 
     const entry = pinTrust("hello", observed);
@@ -212,6 +219,61 @@ test("detects tool catalog drift", () => {
   });
 });
 
+/**
+ * `Object.prototype` member names are ordinary capsule names: `constructor` satisfies the manifest
+ * name pattern, and a hand-edited trust.json can hold literally any key. None of them may resolve
+ * to an inherited value, swap the dictionary's prototype, or vanish on save.
+ */
+const PROTOTYPE_NAMES = ["constructor", "__proto__", "toString", "valueOf"];
+
+test("pins capsules named after Object.prototype members", () => {
+  withHome(() => {
+    const key = loadOrCreateSigningKey();
+
+    for (const name of PROTOTYPE_NAMES) {
+      const before = loadTrustStore();
+      assert.equal(before.capsules[name], undefined, `unpinned ${name} must not resolve to anything`);
+      assert.equal(checkTrust(before.capsules[name], observedOf(key, CATALOG_A, name)), "pinned");
+
+      const entry = pinTrust(name, observedOf(key, CATALOG_A, name));
+      const reloaded = loadTrustStore();
+      assert.deepEqual(reloaded.capsules[name], entry, `${name} must survive a save/load round trip`);
+      assert.equal(checkTrust(reloaded.capsules[name], observedOf(key, CATALOG_A, name)), "ok");
+      assert.throws(
+        () => checkTrust(reloaded.capsules[name], observedOf(foreignKey(), CATALOG_A, name)),
+        capsuleError("E_TRUST", new RegExp(`publisher key changed for ${name}`)),
+      );
+    }
+
+    assert.deepEqual(Object.keys(loadTrustStore().capsules).sort(), [...PROTOTYPE_NAMES].sort());
+  });
+});
+
+test("loads a stored entry named __proto__ without polluting Object.prototype", () => {
+  withHome((home) => {
+    const entryFor = (digit: string): TrustEntry => ({
+      keyId: "sha256:" + digit.repeat(64),
+      publicKey: "AAAA",
+      toolCatalogDigest: CATALOG_A,
+      pinnedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const [proto, ctor] = [entryFor("4"), entryFor("5")];
+    mkdirSync(home, { recursive: true });
+    // Written as raw JSON: an object literal would treat `__proto__` as a prototype assignment.
+    writeFileSync(
+      join(home, "trust.json"),
+      `{"version":1,"capsules":{"__proto__":${JSON.stringify(proto)},"constructor":${JSON.stringify(ctor)}}}`,
+    );
+
+    const store = loadTrustStore();
+    assert.deepEqual(Object.keys(store.capsules).sort(), ["__proto__", "constructor"]);
+    assert.deepEqual(store.capsules["__proto__"], proto);
+    assert.deepEqual(store.capsules["constructor"], ctor);
+    assert.equal(Object.getPrototypeOf({}), Object.prototype);
+    assert.equal(({} as Record<string, unknown>)["keyId"], undefined);
+  });
+});
+
 test("rejects a corrupt trust store instead of silently discarding pins", () => {
   withHome((home) => {
     mkdirSync(home, { recursive: true });
@@ -239,7 +301,7 @@ test("saveTrustStore writes atomically and leaves no temp file behind", () => {
 
     // Overwriting an existing store works and does not leave trust.json.tmp around.
     saveTrustStore({ version: 1, capsules: {} });
-    assert.deepEqual(loadTrustStore(), { version: 1, capsules: {} });
+    assertEmptyStore(loadTrustStore());
     assert.throws(() => readFileSync(join(home, "trust.json.tmp")), /ENOENT/);
   });
 });

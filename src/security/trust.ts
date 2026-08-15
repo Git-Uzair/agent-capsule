@@ -39,6 +39,17 @@ function isTrustEntry(value: unknown): value is TrustEntry {
 }
 
 /**
+ * Capsule names are attacker-supplied strings, and the manifest name pattern allows `constructor`.
+ * On a plain `{}` dictionary `capsules["constructor"]` would resolve to the inherited `Object`
+ * instead of `undefined`, and `capsules["__proto__"] = entry` would hit the inherited setter,
+ * silently dropping the pin. A prototype-less dictionary makes every name an ordinary key; it still
+ * round-trips through `JSON.stringify`/`JSON.parse`, which define `__proto__` as an own property.
+ */
+function emptyCapsules(): Record<string, TrustEntry> {
+  return Object.create(null) as Record<string, TrustEntry>;
+}
+
+/**
  * A malformed store is an error, never an empty store: silently discarding pins would turn every
  * corrupted file into a free trust-on-first-use for whatever capsule the user runs next.
  */
@@ -48,7 +59,7 @@ export function loadTrustStore(homeDir: string = capsuleHome()): TrustStore {
   try {
     raw = readFileSync(file, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, capsules: {} };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, capsules: emptyCapsules() };
     throw e;
   }
 
@@ -71,7 +82,7 @@ export function loadTrustStore(homeDir: string = capsuleHome()): TrustStore {
     throw new CapsuleError("E_TRUST", `trust store is malformed: ${file}`);
   }
 
-  const entries: Record<string, TrustEntry> = {};
+  const entries = emptyCapsules();
   for (const [name, entry] of Object.entries(capsules as Record<string, unknown>)) {
     if (!isTrustEntry(entry)) {
       throw new CapsuleError("E_TRUST", `trust store entry is malformed: ${name}`, { file, name });
