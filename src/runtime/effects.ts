@@ -30,6 +30,12 @@ export type EffectsOptions = {
    * leaves no trace in it at all. Absent, the last completion is taken as the end.
    */
   maxRequestedOrdinal?: number;
+  /**
+   * What the recording *asked* at each ordinal, which is the only record of the question at an ordinal
+   * whose completion is missing: `recorded` holds completions, so a failed effect leaves its op and
+   * params in its request event and nowhere else.
+   */
+  recordedRequests?: Map<number, { op: string; paramsDigest: string }>;
   state?: CapsuleState;
   clock?: () => string;
   randomBytes?: (n: number) => string;
@@ -164,11 +170,21 @@ export function createEffects(opts: EffectsOptions): EffectsController {
       ms = Math.round((performance.now() - started) / 10) * 10;
     } else if (previous === undefined && i <= lastOrdinal) {
       // A gap within the recording is not an unknown: the recording holds a request for this ordinal
-      // and no completion, which proves the op ran and threw. Running it is how the same failure is
-      // reproduced — and if it returns instead, the recording and this run disagree about the world,
-      // which is a divergence rather than a result. So it runs inside a savepoint that is rolled back
-      // either way: a replay must not leave guest state changed by an effect the recording says never
-      // landed, and the completion is never journalled.
+      // and no completion, which proves the op ran and threw. Reproducing that failure means asking
+      // the same question first — the request event is what the ordinal has instead of a completion,
+      // and without comparing it a guest could fail on some *other* op here and be called faithful.
+      const req = opts.recordedRequests?.get(i);
+      if (!req || req.op !== op || req.paramsDigest !== paramsDigest) {
+        throw new CapsuleError(
+          "E_NONDETERMINISM",
+          `effect #${i} diverged: expected ${req?.op ?? "undefined"}/${req?.paramsDigest ?? "undefined"}, got ${op}/${paramsDigest}`,
+          { i, op, paramsDigest, expectedOp: req?.op, expectedParamsDigest: req?.paramsDigest },
+        );
+      }
+      // Running it is how the same failure is reproduced — and if it returns instead, the recording
+      // and this run disagree about the world, which is a divergence rather than a result. So it runs
+      // inside a savepoint that is rolled back either way: a replay must not leave guest state changed
+      // by an effect the recording says never landed, and the completion is never journalled.
       state?.db.exec("SAVEPOINT capsule_gap");
       try {
         await handlers[op](params);

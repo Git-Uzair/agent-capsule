@@ -436,6 +436,85 @@ test("reports a divergence when the guest stops before a recording's trailing fa
   });
 });
 
+/**
+ * A guest whose last effect is refused — a `kv.get` with a key that is not a string — and which
+ * catches the refusal and returns anyway. Its recording therefore ends at a gap: a request at the
+ * highest ordinal with no completion behind it, which is the one ordinal a replay runs for real
+ * instead of reading an answer back. Its `extra` field is the code of the failure it reproduced.
+ */
+const FAILING_TAIL =
+  "globalThis.tools = {\n" +
+  "  greet(args) {\n" +
+  '    const seen = Number(capsule.kv.get("greet_count") ?? "0") + 1;\n' +
+  '    capsule.kv.set("greet_count", String(seen));\n' +
+  '    capsule.log("greeted " + args.name);\n' +
+  "    const at = capsule.now();\n" +
+  '    let extra = "read";\n' +
+  "    try {\n      capsule.kv.get(7);\n    } catch (e) {\n      extra = e.code;\n    }\n" +
+  '    return { text: "hello " + args.name, at, count: seen, extra };\n' +
+  "  },\n};\n";
+
+/**
+ * Replays that recording with the `effect.requested` at its gap ordinal overwritten. The guest still
+ * asks for the same refused `kv.get` there, so it still fails, still swallows the failure and still
+ * returns the recorded value — the completions agree, the count agrees and the digest agrees. The only
+ * thing that disagrees is the question the recording asked at that ordinal, and a gap is the one place
+ * where no recorded completion is left to compare it against.
+ */
+async function replayWithForgedGapRequest(home: string, request: Record<string, unknown>): Promise<ReplayResult> {
+  const capsule = await packFixture(home, FAILING_TAIL);
+  const paths = sidecarPaths(capsule.file);
+  const recorded = await record(capsule, "ada");
+  assert.deepEqual(recorded.value, { text: "hello ada", at: AT, count: 1, extra: "E_USAGE" });
+  const events = eventsOf(paths.journal, recorded.runId);
+  // The gap is at #4: asked for, never answered.
+  assert.deepEqual(
+    events.filter((e) => e.type === EVENT.effectRequested).map(ordinalOf),
+    [0, 1, 2, 3, 4],
+  );
+  assert.deepEqual(
+    events.filter((e) => e.type === EVENT.effectCompleted).map(ordinalOf),
+    [0, 1, 2, 3],
+  );
+
+  const forged = forgeRun(
+    paths.journal,
+    capsule.capsuleId,
+    events.map((event) =>
+      event.type === EVENT.effectRequested && ordinalOf(event) === 4
+        ? { type: event.type, payload: { ...(event.payload as object), ...request } }
+        : event,
+    ),
+  );
+
+  return await replayRun({ capsule, runId: forged, journalPath: paths.journal, homeDir: home });
+}
+
+test("reports a divergence when the guest asks a different op at a recording's gap ordinal", async () => {
+  await withHome(async (home) => {
+    // The recording says the effect that failed was a `clock.now`. The guest that runs now fails at
+    // that ordinal too, but on a `kv.get` — reproducing *a* failure is not reproducing *the* failure.
+    const replay = await replayWithForgedGapRequest(home, { op: "clock.now" });
+
+    assert.equal(replay.ok, false);
+    assert.equal(replay.diverged, true);
+    assert.equal(replay.error?.code, "E_NONDETERMINISM");
+    assert.match(replay.error?.message ?? "", /effect #4 diverged: expected clock\.now\//);
+  });
+});
+
+test("reports a divergence when the guest asks the same op with different params at a gap ordinal", async () => {
+  await withHome(async (home) => {
+    // Same op, different question: the recording's failed `kv.get` asked for another key.
+    const replay = await replayWithForgedGapRequest(home, { paramsDigest: digestOf({ key: "other" }) });
+
+    assert.equal(replay.ok, false);
+    assert.equal(replay.diverged, true);
+    assert.equal(replay.error?.code, "E_NONDETERMINISM");
+    assert.match(replay.error?.message ?? "", /effect #4 diverged: expected kv\.get\//);
+  });
+});
+
 test("refuses a run whose arguments were not journalled", async () => {
   await withHome(async (home) => {
     const capsule = await packFixture(home);

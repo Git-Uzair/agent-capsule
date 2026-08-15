@@ -58,6 +58,8 @@ type Ctx = {
   effects(opts: {
     mode: "record" | "replay";
     recorded?: RecordedEffect[];
+    /** What the recording asked at each ordinal, which is all a gap ordinal has to be checked against. */
+    recordedRequests?: Map<number, { op: string; paramsDigest: string }>;
     manifest?: Manifest;
     grants?: Record<string, boolean>;
     tool?: string;
@@ -94,6 +96,7 @@ async function withRun(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
           tool: opts.tool ?? "greet",
           mode: opts.mode,
           recorded: opts.recorded,
+          recordedRequests: opts.recordedRequests,
           state: "state" in opts ? opts.state : state,
           clock: () => TIMES[next++] ?? "2026-01-01T00:00:09.000Z",
           randomBytes: (n) => "aa".repeat(n),
@@ -405,6 +408,15 @@ test("kv value limit is measured in bytes, not UTF-16 units", async () => {
 });
 
 /**
+ * The request the recording holds at the gap ordinal of the two tests below. An ordinary ordinal is
+ * compared against its recorded completion; a gap has none, so its op and params can only be compared
+ * against the `kv.set` the recording asked for there — which is all this map needs to carry.
+ */
+function requestsAt1(params: unknown): Map<number, { op: string; paramsDigest: string }> {
+  return new Map([[1, { op: "kv.set", paramsDigest: digestOf(params) }]]);
+}
+
+/**
  * A failed effect consumes an ordinal but writes no completion, so the recording has a gap and
  * `recorded[i]` is not effect `i`. Replay is keyed on the ordinal: recorded ordinals are returned
  * verbatim, and a gap is executed so it fails exactly as it did in the recording.
@@ -433,7 +445,7 @@ test("replays a run in which an effect failed", async () => {
     // With the row gone, an executed `kv.get` would answer `null`: "1" can only come from the
     // recording, which is how the test tells replayed values from re-executed ones.
     state.sqlExec("DELETE FROM kv");
-    const replay = effects({ mode: "replay", recorded });
+    const replay = effects({ mode: "replay", recorded, recordedRequests: requestsAt1(oversized) });
     assert.equal(await replay.controller.dispatch("greet", "kv.set", { key: "a", value: "1" }), true);
     await assert.rejects(
       () => replay.controller.dispatch("greet", "kv.set", oversized),
@@ -463,6 +475,10 @@ test("replays a run in which an effect failed", async () => {
 test("replay diverges when a failed effect succeeds instead", async () => {
   await withRun(async ({ journal, state, effects }) => {
     const oversized = { key: "big", value: "\u20AC".repeat(30_000) };
+    // What the recording asked at the gap: a write that failed then — a fuller disk, a tighter budget —
+    // and that this host will carry out. Asking the recorded question is the precondition of the check
+    // below, since a *different* question at a gap is a divergence of its own.
+    const failedThen = { key: "big", value: "small" };
     const record = effects({ mode: "record" });
     await record.controller.dispatch("greet", "kv.set", { key: "a", value: "1" });
     await assert.rejects(
@@ -473,11 +489,11 @@ test("replay diverges when a failed effect succeeds instead", async () => {
     const recorded = journal.effects(record.runId);
     assert.deepEqual(recorded.map((e) => e.i), [0, 2]);
 
-    const replay = effects({ mode: "replay", recorded });
+    const replay = effects({ mode: "replay", recorded, recordedRequests: requestsAt1(failedThen) });
     assert.equal(await replay.controller.dispatch("greet", "kv.set", { key: "a", value: "1" }), true);
     await assert.rejects(
-      // Same ordinal, a value that now fits: the op the recording says failed would succeed.
-      () => replay.controller.dispatch("greet", "kv.set", { key: "big", value: "small" }),
+      // The recorded ordinal, the recorded question, and this time it succeeds.
+      () => replay.controller.dispatch("greet", "kv.set", failedThen),
       capsuleError("E_NONDETERMINISM", /^effect #1 diverged: expected failure, got completion$/),
     );
 

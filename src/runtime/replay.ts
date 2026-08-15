@@ -145,6 +145,16 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
       const i = fields(e.payload).i;
       return typeof i === "number" ? Math.max(max, i) : max;
     }, -1);
+    // The questions, kept by ordinal. An effect that failed has a request and no completion, so this is
+    // the only thing a re-run gap ordinal can be checked against; a payload missing any of the three
+    // fields is left out, and an ordinal with nothing behind it is itself a divergence.
+    const recordedRequests = new Map<number, { op: string; paramsDigest: string }>();
+    for (const e of requested) {
+      const p = fields(e.payload);
+      if (typeof p.i === "number" && typeof p.op === "string" && typeof p.paramsDigest === "string") {
+        recordedRequests.set(p.i, { op: p.op, paramsDigest: p.paramsDigest });
+      }
+    }
     // How many effects the recording holds, which is not how many it *answered*: the ordinals are
     // dense, so one past the highest request is the count, and a trailing failure is one of them. The
     // completions are still the floor, because a journal is a file and a hand-edited one can hold a
@@ -173,6 +183,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
       mode: "replay",
       recorded,
       maxRequestedOrdinal,
+      recordedRequests,
       state,
     });
 
