@@ -24,6 +24,12 @@ export type EffectsOptions = {
   tool: string;
   mode: "record" | "replay";
   recorded?: RecordedEffect[];
+  /**
+   * The highest ordinal the recording holds a *request* for, which is the only thing that says where
+   * a recording that ends at a failed effect ends: `recorded` lists completions, so a trailing failure
+   * leaves no trace in it at all. Absent, the last completion is taken as the end.
+   */
+  maxRequestedOrdinal?: number;
   state?: CapsuleState;
   clock?: () => string;
   randomBytes?: (n: number) => string;
@@ -71,9 +77,11 @@ export function createEffects(opts: EffectsOptions): EffectsController {
   // A recorded effect is found by its ordinal, never by its position: `journal.effects()` lists
   // completed effects only, so an effect that failed leaves a gap and the two stop agreeing after
   // the first failure. `lastOrdinal` is where the recording ends, which is what tells a gap (an
-  // effect that ran and failed) apart from a replay that has run past the end of the recording.
+  // effect that ran and threw) apart from a replay that has run past the end of the recording. The
+  // last completion is not that end when the recording's final effect is one of the failures — hence
+  // `maxRequestedOrdinal`, which counts the requests and so sees a failure with nothing behind it.
   const byOrdinal = new Map(recorded.map((r) => [r.i, r]));
-  const lastOrdinal = recorded.reduce((max, r) => Math.max(max, r.i), -1);
+  const lastOrdinal = recorded.reduce((max, r) => Math.max(max, r.i), opts.maxRequestedOrdinal ?? -1);
 
   const needState = (op: EffectName): CapsuleState => state ?? usage(`${op} requires capsule state`, { op });
 
@@ -154,13 +162,13 @@ export function createEffects(opts: EffectsOptions): EffectsController {
       value = await handlers[op](params);
       // Bucketed to 10 ms: a real duration in the payload would make the hash chain unreproducible.
       ms = Math.round((performance.now() - started) / 10) * 10;
-    } else if (previous === undefined && i < lastOrdinal) {
-      // A gap below the end of the recording is not an unknown: the recording holds a request for
-      // this ordinal and no completion, which proves the op ran and threw. Running it is how the
-      // same failure is reproduced — and if it returns instead, the recording and this run disagree
-      // about the world, which is a divergence rather than a result. So it runs inside a savepoint
-      // that is rolled back either way: a replay must not leave guest state changed by an effect the
-      // recording says never landed, and the completion is never journalled.
+    } else if (previous === undefined && i <= lastOrdinal) {
+      // A gap within the recording is not an unknown: the recording holds a request for this ordinal
+      // and no completion, which proves the op ran and threw. Running it is how the same failure is
+      // reproduced — and if it returns instead, the recording and this run disagree about the world,
+      // which is a divergence rather than a result. So it runs inside a savepoint that is rolled back
+      // either way: a replay must not leave guest state changed by an effect the recording says never
+      // landed, and the completion is never journalled.
       state?.db.exec("SAVEPOINT capsule_gap");
       try {
         await handlers[op](params);

@@ -362,6 +362,51 @@ test("a guest that swallows a diverged effect still reports the divergence", asy
   });
 });
 
+test("replays a recording whose last effect failed", async () => {
+  await withHome(async (home) => {
+    // This guest's last effect is a `kv.get` with a key that is not a string, which the port refuses,
+    // and it catches the refusal and returns anyway. So the recording ends *at* a failure: the highest
+    // ordinal it holds a request for has no completion behind it. A faithful replay re-runs that effect
+    // and is refused again — the recording does not stop one ordinal earlier than it looks.
+    const capsule = await packFixture(
+      home,
+      "globalThis.tools = {\n" +
+        "  greet(args) {\n" +
+        '    const seen = Number(capsule.kv.get("greet_count") ?? "0") + 1;\n' +
+        '    capsule.kv.set("greet_count", String(seen));\n' +
+        '    capsule.log("greeted " + args.name);\n' +
+        "    const at = capsule.now();\n" +
+        '    let extra = "read";\n' +
+        "    try {\n      capsule.kv.get(7);\n    } catch (e) {\n      extra = e.code;\n    }\n" +
+        '    return { text: "hello " + args.name, at, count: seen, extra };\n' +
+        "  },\n};\n",
+    );
+    const paths = sidecarPaths(capsule.file);
+    const recorded = await record(capsule, "ada");
+    assert.deepEqual(recorded.value, { text: "hello ada", at: AT, count: 1, extra: "E_USAGE" });
+
+    // Five effects were asked for and four answered: the trailing request is the whole point.
+    const events = eventsOf(paths.journal, recorded.runId);
+    assert.deepEqual(
+      events.filter((e) => e.type === EVENT.effectRequested).map(ordinalOf),
+      [0, 1, 2, 3, 4],
+    );
+    assert.deepEqual(
+      events.filter((e) => e.type === EVENT.effectCompleted).map(ordinalOf),
+      [0, 1, 2, 3],
+    );
+
+    const replay = await replayRun({ capsule, runId: recorded.runId, homeDir: home });
+
+    assert.equal(replay.error, undefined);
+    assert.equal(replay.ok, true);
+    assert.equal(replay.diverged, false);
+    assert.equal(replay.effects, 5);
+    assert.deepEqual(replay.value, recorded.value);
+    assert.equal(replay.recordedValueDigest, digestOf(recorded.value));
+  });
+});
+
 test("refuses a run whose arguments were not journalled", async () => {
   await withHome(async (home) => {
     const capsule = await packFixture(home);

@@ -134,6 +134,17 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
     }
 
     const recorded = journal.effects(runId);
+    // Completions alone do not say how far the recording goes: a run whose *last* effect failed
+    // recorded a request for it and nothing else, and an effect the recording shows failing has to be
+    // re-run rather than read as a question the recording never asked. The requests are what carry
+    // that ordinal, so the highest of them is the end of the recording.
+    const requested = events.filter((e) => e.type === EVENT.effectRequested);
+    const maxRequestedOrdinal = requested.reduce((max, e) => {
+      // A journal is a file on disk, so an ordinal that is not a number is a payload to ignore rather
+      // than a `NaN` to carry into the comparison — where it would make every ordinal look unknown.
+      const i = fields(e.payload).i;
+      return typeof i === "number" ? Math.max(max, i) : max;
+    }, -1);
     // State is opened for one reason: an effect the recording shows failing is re-run inside a
     // savepoint that is rolled back, and that needs the database it would have written to. Nothing
     // else in a replay touches it.
@@ -156,6 +167,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
       tool,
       mode: "replay",
       recorded,
+      maxRequestedOrdinal,
       state,
     });
 
