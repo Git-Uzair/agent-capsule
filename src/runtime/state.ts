@@ -63,6 +63,25 @@ function bind(params: unknown[] | undefined): SQLInputValue[] {
 }
 
 /**
+ * How much of the byte budget a row costs, measured without serialising it: `JSON.stringify` on a row
+ * holding a gigabyte blob allocates the very thing the budget exists to refuse, and fails with
+ * `RangeError` rather than a refusal. Text is counted in UTF-8 bytes and a blob by its own length,
+ * which is what the budget is actually about; scalars are counted as the JSON text they become.
+ */
+function rowBytes(row: unknown): number {
+  let bytes = 2; // the row's own braces
+  for (const [column, value] of Object.entries(row as Record<string, unknown>)) {
+    bytes += column.length + 4; // the quoted column name, its colon and the separator
+    bytes += typeof value === "string"
+      ? Buffer.byteLength(value, "utf8")
+      : value instanceof Uint8Array
+        ? value.byteLength
+        : String(value).length;
+  }
+  return bytes;
+}
+
+/**
  * Guest state lives in its own file, separate from the journal, so ordinary statements can never
  * name the evidence. That separation is defence in depth, not the whole defence: `ATTACH` would
  * link the journal into the guest's connection, so both ports also reject the statements that
@@ -108,12 +127,28 @@ export function openState(appDbPath: string): CapsuleState {
 
     sqlQuery(sql, params) {
       assertAllowed("sql.query", sql);
-      const rows = roDb.prepare(sql).all(...bind(params));
-      if (rows.length > MAX_QUERY_ROWS) {
-        usage(`sql.query returned more than ${MAX_QUERY_ROWS} rows`, { rows: rows.length });
+      // Both caps are tested while the result is still arriving. `.all()` would build the whole
+      // thing first, which makes the caps assertions about a cost already paid: a 20-million-row
+      // query kills the host before the row check can fire. `for...of` closes the statement for us
+      // on the way out, including the way out through a refusal.
+      const statement = roDb.prepare(sql);
+      const rows: unknown[] = [];
+      let bytes = 0;
+      try {
+        for (const row of statement.iterate(...bind(params))) {
+          if (rows.length >= MAX_QUERY_ROWS) {
+            usage(`sql.query returned more than ${MAX_QUERY_ROWS} rows`, { rows: rows.length + 1 });
+          }
+          bytes += rowBytes(row);
+          if (bytes > MAX_QUERY_BYTES) usage(`sql.query result exceeds ${MAX_QUERY_BYTES} bytes`, { bytes });
+          rows.push(row);
+        }
+      } catch (error) {
+        if (error instanceof CapsuleError) throw error;
+        // SQLite giving up part-way — a blob it cannot allocate, a write refused by the read-only
+        // handle — is the guest's query being too much for this host, not a host defect.
+        usage(error instanceof Error ? error.message : String(error), { sql });
       }
-      const bytes = Buffer.byteLength(JSON.stringify(rows));
-      if (bytes > MAX_QUERY_BYTES) usage(`sql.query result exceeds ${MAX_QUERY_BYTES} bytes`, { bytes });
       return rows;
     },
 

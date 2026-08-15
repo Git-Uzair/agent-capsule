@@ -344,6 +344,50 @@ test("blocks disallowed statements hidden behind semicolons and comments", async
   });
 });
 
+/**
+ * The row and byte caps exist to stop a query the host cannot afford, so they have to hold while the
+ * result is still arriving. A cap tested after the result is in memory is not a cap: the query has
+ * already been paid for by then, and the payment is what kills the process.
+ */
+test("sql.query caps a result while it streams, not after", async () => {
+  await withRun(async ({ effects }) => {
+    const { controller } = effects({ mode: "record" });
+    // Twenty million rows: materialising this before counting it is a heap OOM, not an E_USAGE.
+    await assert.rejects(
+      () =>
+        controller.dispatch("greet", "sql.query", {
+          sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 20000000) SELECT n FROM c",
+        }),
+      capsuleError("E_USAGE", /^sql\.query returned more than 1000 rows$/),
+    );
+
+    // Inside the row cap, past the byte budget: 100 rows of 40 000 hex characters is about 4 MiB.
+    await assert.rejects(
+      () =>
+        controller.dispatch("greet", "sql.query", {
+          sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 100)"
+            + " SELECT hex(randomblob(20000)) AS b FROM c",
+        }),
+      capsuleError("E_USAGE", /^sql\.query result exceeds 1048576 bytes$/),
+    );
+
+    // One row is enough to bust the budget on its own. A gigabyte blob is measured by its own byte
+    // length — serialising it to count it is what produced `RangeError` instead of a refusal — and
+    // if SQLite cannot allocate it at all, that failure is the guest's query being too big too.
+    await assert.rejects(
+      () => controller.dispatch("greet", "sql.query", { sql: "SELECT randomblob(1000000000) AS b" }),
+      capsuleError("E_USAGE", /exceeds 1048576 bytes|out of memory|too big|array length/i),
+    );
+
+    // A result inside both caps still comes back whole, right up to the last allowed row.
+    const rows = (await controller.dispatch("greet", "sql.query", {
+      sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 1000) SELECT n FROM c",
+    })) as { n: number }[];
+    assert.equal(rows.length, 1000);
+    assert.equal(rows[999]?.n, 1000);
+  });
+});
+
 test("kv value limit is measured in bytes, not UTF-16 units", async () => {
   await withRun(async ({ effects, state }) => {
     const { controller } = effects({ mode: "record" });
@@ -406,6 +450,44 @@ test("replays a run in which an effect failed", async () => {
         return rest;
       }),
     );
+    assert.doesNotThrow(() => journal.verifyChain(replay.runId));
+  });
+});
+
+/**
+ * A gap is not an unknown: the recording holds a request for that ordinal and no completion, which
+ * proves the op failed. Running it is how the same failure is reproduced — so if it succeeds this
+ * time, the recording and this run disagree about the world. That is a divergence, and it must not
+ * be journalled as a completion or be allowed to leave the guest's state changed.
+ */
+test("replay diverges when a failed effect succeeds instead", async () => {
+  await withRun(async ({ journal, state, effects }) => {
+    const oversized = { key: "big", value: "\u20AC".repeat(30_000) };
+    const record = effects({ mode: "record" });
+    await record.controller.dispatch("greet", "kv.set", { key: "a", value: "1" });
+    await assert.rejects(
+      () => record.controller.dispatch("greet", "kv.set", oversized),
+      capsuleError("E_USAGE", /^kv value exceeds 65536 bytes$/),
+    );
+    await record.controller.dispatch("greet", "kv.get", { key: "a" });
+    const recorded = journal.effects(record.runId);
+    assert.deepEqual(recorded.map((e) => e.i), [0, 2]);
+
+    const replay = effects({ mode: "replay", recorded });
+    assert.equal(await replay.controller.dispatch("greet", "kv.set", { key: "a", value: "1" }), true);
+    await assert.rejects(
+      // Same ordinal, a value that now fits: the op the recording says failed would succeed.
+      () => replay.controller.dispatch("greet", "kv.set", { key: "big", value: "small" }),
+      capsuleError("E_NONDETERMINISM", /^effect #1 diverged: expected failure, got completion$/),
+    );
+
+    // No completion for the diverging ordinal, and no write behind it either.
+    assert.deepEqual(journal.effects(replay.runId).map((e) => e.i), [0]);
+    assert.deepEqual(
+      journal.events(replay.runId).map((e) => e.type),
+      [EVENT.effectRequested, EVENT.effectCompleted, EVENT.effectRequested],
+    );
+    assert.equal(state.kvGet("big"), null);
     assert.doesNotThrow(() => journal.verifyChain(replay.runId));
   });
 });

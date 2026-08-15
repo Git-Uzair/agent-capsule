@@ -149,14 +149,30 @@ export function createEffects(opts: EffectsOptions): EffectsController {
     let value: unknown;
     let ms: number | undefined;
     const previous = byOrdinal.get(i);
-    if (mode === "record" || (previous === undefined && i < lastOrdinal)) {
-      // Record, or the replay of an ordinal the recording never completed: run the op and let it
-      // fail the way it failed then. A trailing failure cannot be told from a divergence — the
-      // recording simply ends — so it is reported as one, below.
+    if (mode === "record") {
       const started = performance.now();
       value = await handlers[op](params);
       // Bucketed to 10 ms: a real duration in the payload would make the hash chain unreproducible.
-      if (mode === "record") ms = Math.round((performance.now() - started) / 10) * 10;
+      ms = Math.round((performance.now() - started) / 10) * 10;
+    } else if (previous === undefined && i < lastOrdinal) {
+      // A gap below the end of the recording is not an unknown: the recording holds a request for
+      // this ordinal and no completion, which proves the op ran and threw. Running it is how the
+      // same failure is reproduced — and if it returns instead, the recording and this run disagree
+      // about the world, which is a divergence rather than a result. So it runs inside a savepoint
+      // that is rolled back either way: a replay must not leave guest state changed by an effect the
+      // recording says never landed, and the completion is never journalled.
+      state?.db.exec("SAVEPOINT capsule_gap");
+      try {
+        await handlers[op](params);
+      } finally {
+        state?.db.exec("ROLLBACK TO capsule_gap");
+        state?.db.exec("RELEASE capsule_gap");
+      }
+      throw new CapsuleError("E_NONDETERMINISM", `effect #${i} diverged: expected failure, got completion`, {
+        i,
+        op,
+        paramsDigest,
+      });
     } else {
       if (previous === undefined || previous.op !== op || previous.paramsDigest !== paramsDigest) {
         throw new CapsuleError(
