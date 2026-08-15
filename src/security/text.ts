@@ -7,29 +7,41 @@ const CONTROL_CHARS_PATTERN =
 const EXCESS_NEWLINES_PATTERN = /\n{3,}/g;
 const TRUNCATION_SUFFIX = " …[truncated]";
 
+// String.prototype.toWellFormed is ES2024; this project's tsconfig lib is es2023.
+function toWellFormed(v: string): string {
+  return (v as unknown as { toWellFormed(): string }).toWellFormed();
+}
+
 export function sanitizeModelText(s: string, max?: number): string {
   if (typeof s !== "string") {
     return "";
   }
 
-  let result = s.normalize("NFKC");
+  // Replace lone surrogates with U+FFFD up front so every later slice — and the
+  // returned string — is well-formed no matter how ill-formed the input was.
+  let result = toWellFormed(s).normalize("NFKC");
   result = result.replace(ANSI_ESCAPE_PATTERN, "");
   result = result.replace(ZERO_WIDTH_BIDI_PATTERN, "");
   result = result.replace(CONTROL_CHARS_PATTERN, "");
   result = result.replace(EXCESS_NEWLINES_PATTERN, "\n\n").trim();
 
-  if (max !== undefined && result.length > max) {
-    if (max <= TRUNCATION_SUFFIX.length) {
-      return TRUNCATION_SUFFIX.slice(0, max);
+  if (max !== undefined) {
+    // Non-positive (or NaN) max leaves no room for any output at all.
+    if (!(max > 0)) {
+      return "";
     }
-    let cutLen = max - TRUNCATION_SUFFIX.length;
-    if (cutLen > 0) {
+    if (result.length > max) {
+      if (max <= TRUNCATION_SUFFIX.length) {
+        return TRUNCATION_SUFFIX.slice(0, max);
+      }
+      let cutLen = max - TRUNCATION_SUFFIX.length;
       const code = result.charCodeAt(cutLen - 1);
       if (code >= 0xd800 && code <= 0xdbff) {
+        // Never cut between the halves of a surrogate pair.
         cutLen -= 1;
       }
+      return result.slice(0, cutLen) + TRUNCATION_SUFFIX;
     }
-    return result.slice(0, cutLen) + TRUNCATION_SUFFIX;
   }
 
   return result;
@@ -72,13 +84,17 @@ export function confusableSkeleton(s: string): string {
   return normalized.replace(HOMOGLYPH_PATTERN, (ch) => HOMOGLYPH_MAP[ch] ?? ch);
 }
 
+// The whole text is scanned, so the gap-matching spans inside a pattern are
+// bounded (120 chars — more than any real marker phrase puts between its
+// tokens). Unbounded `[^|]*` / `.*` spans backtrack quadratically: 300k chars
+// of "cur"+"l " took 11.7s; bounded at 120 the same input takes ~19ms.
 const INJECTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ["ignore_previous", /ignore\s+(all\s+)?(previous|prior|above)/i],
   ["system_prompt", /system\s*prompt|<\s*system\s*>/i],
   ["conceal", /do not (tell|mention|inform)|without (telling|informing)/i],
   ["credential_path", /\.ssh|id_[rd]sa|\/etc\/shadow|\.env\b|credentials\.json/i],
-  ["exfil", /curl\s[^|]*\|\s*(sh|bash)|base64\s+-d|\bwebhook\b.*\bpost\b/i],
-  ["tool_directive", /\bbefore using this tool\b|\balways call\b.*\bfirst\b/i],
+  ["exfil", /curl\s[^|]{0,120}\|\s*(sh|bash)|base64\s+-d|\bwebhook\b.{0,120}\bpost\b/i],
+  ["tool_directive", /\bbefore using this tool\b|\balways call\b.{0,120}\bfirst\b/i],
 ];
 
 export function scanForInjection(s: string): string[] {
@@ -86,7 +102,7 @@ export function scanForInjection(s: string): string[] {
     if (typeof s !== "string") {
       return [];
     }
-    const clean = confusableSkeleton(sanitizeModelText(s, 8192));
+    const clean = confusableSkeleton(sanitizeModelText(s));
     const matched: string[] = [];
     for (const [name, regex] of INJECTION_PATTERNS) {
       if (regex.test(clean)) {
