@@ -4,6 +4,17 @@ function fail(what: string): never {
   throw new CapsuleError("E_DIGEST", `value has no canonical JSON form: ${what}`);
 }
 
+/**
+ * The one guard for "is this parsed JSON value something with named fields?". Arrays and `null` are
+ * objects to `typeof` but have no fields worth reading, so both answer `undefined` — a caller can
+ * therefore treat `undefined` as "absent or unusable" without a second check.
+ */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
 export function canonicalize(value: unknown): string {
   if (value === null) return "null";
   switch (typeof value) {

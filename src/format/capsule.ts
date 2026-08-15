@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalize } from "../core/canonical.ts";
+import { asRecord, canonicalize } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import {
   loadOrCreateSigningKey,
@@ -137,8 +137,6 @@ function parseDoc(text: string, path: string): Record<string, unknown> {
 }
 
 const isString = (value: unknown): boolean => typeof value === "string";
-const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 
 function asStatement(doc: Record<string, unknown>): Statement {
   const subject = asRecord(doc["subject"]);

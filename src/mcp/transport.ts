@@ -1,4 +1,5 @@
 import { StringDecoder } from "node:string_decoder";
+import { asRecord } from "../core/canonical.ts";
 
 export type JsonRpcId = string | number;
 
@@ -52,12 +53,6 @@ export type Transport = {
 // 16 MiB. Large enough for any legitimate payload, small enough that a peer
 // cannot exhaust our heap by never sending a newline.
 const DEFAULT_MAX_LINE_LENGTH = 16 * 1024 * 1024;
-
-function asRecord(v: unknown): Record<string, unknown> | undefined {
-  return typeof v === "object" && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : undefined;
-}
 
 function asId(v: unknown): JsonRpcId | undefined {
   return typeof v === "string" || typeof v === "number" ? v : undefined;

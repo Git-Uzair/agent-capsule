@@ -1,3 +1,4 @@
+import { asRecord } from "../core/canonical.ts";
 import { sanitizeModelText } from "../security/text.ts";
 
 export type Meta = {
@@ -12,12 +13,6 @@ const TRACEPARENT_PATTERN = /^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 
 const CALLER_NAME_MAX = 128;
 const CALLER_KIND_MAX = 64;
-
-function asRecord(v: unknown): Record<string, unknown> | undefined {
-  return typeof v === "object" && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : undefined;
-}
 
 // Every field is optional and every invalid field is dropped rather than rejected:
 // `_meta` is advisory transport metadata, so a bad progress token must not fail a

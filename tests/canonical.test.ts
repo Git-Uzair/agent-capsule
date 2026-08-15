@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canonicalize } from "../src/core/canonical.ts";
+import { asRecord, canonicalize } from "../src/core/canonical.ts";
 import { digestBytes, digestOf, sha256Hex } from "../src/core/digest.ts";
 import { CapsuleError } from "../src/core/errors.ts";
 
@@ -47,4 +47,14 @@ test("digests are stable and prefixed", () => {
 
 test("digestBytes hashes Uint8Array", () => {
   assert.equal(digestBytes(new TextEncoder().encode("abc")), `sha256:${sha256Hex("abc")}`);
+});
+
+test("asRecord accepts plain objects and rejects everything without named fields", () => {
+  const obj = { a: 1 };
+  assert.equal(asRecord(obj), obj);
+  const bare = Object.create(null) as Record<string, unknown>;
+  assert.equal(asRecord(bare), bare);
+  for (const bad of [null, undefined, [], [1], "x", 0, false, () => 1]) {
+    assert.equal(asRecord(bad), undefined);
+  }
 });
