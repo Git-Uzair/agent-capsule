@@ -106,33 +106,39 @@ function parsePayload(json: string, idx: number): unknown {
 export function openJournal(path: string): Journal {
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  // The path is the caller's, so the file it names may not be a database at all. SQLite says so on
-  // the first statement, by which time the handle is open: it is closed here rather than left to
-  // hold a lock on a file the caller is about to be told is unusable.
-  try {
-    db.exec(SCHEMA);
-  } catch (e) {
-    db.close();
-    throw e;
-  }
-
-  const insertRun = db.prepare(
-    "INSERT INTO capsule_runs (run_id, capsule_id, tool, mode, status, started_at) VALUES (?, ?, ?, ?, 'running', ?)",
-  );
-  const updateStatus = db.prepare("UPDATE capsule_runs SET status = ? WHERE run_id = ?");
-  const selectLast = db.prepare("SELECT idx, hash FROM capsule_events WHERE run_id = ? ORDER BY idx DESC LIMIT 1");
-  const insertEvent = db.prepare(
-    "INSERT INTO capsule_events (run_id, idx, type, payload, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
-  );
-  const selectEvents = db.prepare(
-    "SELECT idx, type, payload, prev_hash, hash FROM capsule_events WHERE run_id = ? ORDER BY idx ASC",
-  );
-  // `latestRunId()` with no capsule means "any capsule", expressed as a single statement so the
-  // ordering rule lives in exactly one place. Insertion order breaks ties on equal timestamps.
-  const selectLatest = db.prepare(
-    "SELECT run_id FROM capsule_runs WHERE (:capsuleId IS NULL OR capsule_id = :capsuleId) " +
-      "ORDER BY started_at DESC, rowid DESC LIMIT 1",
-  );
+  // The path is the caller's, so the file it names may not be a database at all — and if it is one, its
+  // tables may not be these. SQLite says so on the first statement it cannot run, which is either the
+  // schema or one of the statements compiled against it, and by then the handle is open. Everything
+  // that can fail while it is open sits inside this one `try`, so the handle is closed rather than left
+  // holding a lock on a file the caller is about to be told is unusable.
+  const { insertRun, updateStatus, selectLast, insertEvent, selectEvents, selectLatest } = (() => {
+    try {
+      db.exec(SCHEMA);
+      return {
+        insertRun: db.prepare(
+          "INSERT INTO capsule_runs (run_id, capsule_id, tool, mode, status, started_at) " +
+            "VALUES (?, ?, ?, ?, 'running', ?)",
+        ),
+        updateStatus: db.prepare("UPDATE capsule_runs SET status = ? WHERE run_id = ?"),
+        selectLast: db.prepare("SELECT idx, hash FROM capsule_events WHERE run_id = ? ORDER BY idx DESC LIMIT 1"),
+        insertEvent: db.prepare(
+          "INSERT INTO capsule_events (run_id, idx, type, payload, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
+        ),
+        selectEvents: db.prepare(
+          "SELECT idx, type, payload, prev_hash, hash FROM capsule_events WHERE run_id = ? ORDER BY idx ASC",
+        ),
+        // `latestRunId()` with no capsule means "any capsule", expressed as a single statement so the
+        // ordering rule lives in exactly one place. Insertion order breaks ties on equal timestamps.
+        selectLatest: db.prepare(
+          "SELECT run_id FROM capsule_runs WHERE (:capsuleId IS NULL OR capsule_id = :capsuleId) " +
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        ),
+      };
+    } catch (e) {
+      db.close();
+      throw e;
+    }
+  })();
 
   const rowsOf = (runId: string): EventRow[] => selectEvents.all(runId) as EventRow[];
 

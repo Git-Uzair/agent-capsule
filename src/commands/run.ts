@@ -1,5 +1,5 @@
 import { CapsuleError } from "../core/errors.ts";
-import { loadCapsule } from "../format/capsule.ts";
+import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
 import { invokeTool, type InvokeResult } from "../runtime/invoke.ts";
 
 const USAGE =
@@ -56,7 +56,17 @@ export async function runCommand(argv: string[]): Promise<number> {
   if (file === undefined) usage("run needs a capsule file");
   if (tool === undefined) usage("run needs --tool <name>");
 
-  const capsule = await loadCapsule(file, { acceptDrift });
+  // The path came off a command line, so the file behind it may not be there, may be a directory, or
+  // may be unreadable — `node:fs` failures that are not in this vocabulary and whose stack frames are
+  // nobody's business but ours. `verify` reports the same class of failure under the same code.
+  let capsule: LoadedCapsule;
+  try {
+    capsule = await loadCapsule(file, { acceptDrift });
+  } catch (e) {
+    if (e instanceof CapsuleError) throw e;
+    throw new CapsuleError("E_CONTAINER", e instanceof Error ? e.message : String(e), { file });
+  }
+
   const result = await invokeTool({
     capsule,
     tool,

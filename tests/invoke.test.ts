@@ -8,6 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
 import { EVENT, openJournal } from "../src/runtime/journal.ts";
 import { invokeTool, sidecarPaths, type InvokeResult } from "../src/runtime/invoke.ts";
+import { openState } from "../src/runtime/state.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
 const CLI = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -434,6 +435,37 @@ test("a state path that is not a database is refused and journals nothing", asyn
   });
 });
 
+test("openJournal closes its handle when the file holds a conflicting schema", async () => {
+  await withHome(async (home) => {
+    const journalPath = join(home, "conflict-journal.sqlite");
+    // A real database whose tables are not the journal's: opening it succeeds and every
+    // `CREATE TABLE IF NOT EXISTS` is a no-op, so the schema is only found to be the wrong one when
+    // a statement is compiled against it — with the handle already open.
+    const seed = new DatabaseSync(journalPath);
+    seed.exec("CREATE TABLE capsule_runs (whatever TEXT)");
+    seed.close();
+
+    assert.throws(() => openJournal(journalPath), /table capsule_runs has no column named run_id/);
+    // The unlink is the assertion: an open SQLite handle holds the file on Windows, so this is
+    // `EPERM` unless the failure was thrown with no handle left behind.
+    rmSync(journalPath);
+  });
+});
+
+test("openState closes both handles when the file holds a conflicting schema", async () => {
+  await withHome(async (home) => {
+    const statePath = join(home, "conflict-state.sqlite");
+    const seed = new DatabaseSync(statePath);
+    seed.exec("CREATE TABLE kv (whatever TEXT)");
+    seed.close();
+
+    assert.throws(() => openState(statePath), /no such column: v/);
+    // Both the writable and the read-only handle are open by the time a statement is compiled, and
+    // either one left behind fails this unlink.
+    rmSync(statePath);
+  });
+});
+
 test("cli run reports a corrupt sidecar as a coded failure rather than a stack trace", async () => {
   await withHome(async (home) => {
     const file = join(home, "hello.capsule");
@@ -473,5 +505,31 @@ test("cli run exits 0 with a value and 1 on a failure", async () => {
     const bad = runCli([file, "--tool", "nope", "--json"], home);
     assert.equal(bad.status, 1);
     assert.equal((JSON.parse(bad.stdout) as InvokeResult).error?.code, "E_USAGE");
+  });
+});
+
+test("cli run reports a capsule path that is not there as E_CONTAINER", async () => {
+  await withHome(async (home) => {
+    const result = runCli([join(home, "not-there.capsule"), "--tool", "greet"], home);
+
+    // The path is the user's input, so a file that is not there is a coded refusal: the `node:fs`
+    // error behind it is not in this vocabulary and its stack frames are not the user's business.
+    assert.equal(result.status, 1);
+    const output = result.stdout + result.stderr;
+    assert.match(output, /E_CONTAINER: /);
+    assert.doesNotMatch(output, /^\s+at /m);
+  });
+});
+
+test("cli run reports a directory given as a capsule as E_CONTAINER", async () => {
+  await withHome(async (home) => {
+    const directory = join(home, "a-directory");
+    mkdirSync(directory, { recursive: true });
+    const result = runCli([directory, "--tool", "greet"], home);
+
+    assert.equal(result.status, 1);
+    const output = result.stdout + result.stderr;
+    assert.match(output, /E_CONTAINER: /);
+    assert.doesNotMatch(output, /^\s+at /m);
   });
 });

@@ -91,22 +91,34 @@ function rowBytes(row: unknown): number {
 export function openState(appDbPath: string): CapsuleState {
   mkdirSync(dirname(appDbPath), { recursive: true });
   const db = new DatabaseSync(appDbPath);
-  // The path is the caller's, so the file it names may not be a database at all, and SQLite only says
-  // so on the first statement — with the handle already open. Whatever fails here, no handle is left
-  // holding a lock on a file the caller is about to be told is unusable.
-  let roDb: DatabaseSync;
-  try {
-    db.exec(SCHEMA);
-    // The read-only handle is opened after the schema exists: SQLite will not create a file for it.
-    roDb = new DatabaseSync(appDbPath, { readOnly: true });
-  } catch (e) {
-    db.close();
-    throw e;
-  }
-
-  const selectValue = db.prepare("SELECT v FROM kv WHERE k = ?");
-  const upsert = db.prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v");
-  const countRows = db.prepare("SELECT COUNT(*) AS n FROM kv");
+  // The path is the caller's, so the file it names may not be a database at all — and if it is one, its
+  // `kv` table may not be this one. SQLite only says so on a statement it cannot run, with the handle
+  // already open, so every step that can fail while a handle is open is inside this one `try`: whatever
+  // fails, no handle is left holding a lock on a file the caller is about to be told is unusable.
+  const { roDb, selectValue, upsert, countRows } = (() => {
+    let ro: DatabaseSync | undefined;
+    try {
+      db.exec(SCHEMA);
+      // The read-only handle is opened after the schema exists: SQLite will not create a file for it.
+      ro = new DatabaseSync(appDbPath, { readOnly: true });
+      return {
+        roDb: ro,
+        selectValue: db.prepare("SELECT v FROM kv WHERE k = ?"),
+        upsert: db.prepare("INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v"),
+        countRows: db.prepare("SELECT COUNT(*) AS n FROM kv"),
+      };
+    } catch (e) {
+      // Either handle may be open by now, and the read-only one goes first, as `close()` does. Failing
+      // to close it is not allowed to replace the failure the caller actually needs to hear.
+      try {
+        ro?.close();
+      } catch {
+        /* the open failure below is the one worth reporting */
+      }
+      db.close();
+      throw e;
+    }
+  })();
 
   const kvGet = (key: string): string | null => {
     assertKey(key);
