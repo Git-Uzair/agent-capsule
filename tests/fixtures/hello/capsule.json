@@ -1,0 +1,29 @@
+{
+  "spec_version": "0.1.0",
+  "meta": {
+    "name": "hello",
+    "version": "1.0.0",
+    "title": "Hello Capsule",
+    "description": "Reference capsule used by the agent-capsule test suite."
+  },
+  "runtime": { "type": "quickjs-1", "entry": "src/main.js", "timeout_ms": 2000 },
+  "capabilities": { "kv": true },
+  "tools": [
+    {
+      "name": "greet",
+      "title": "Greet",
+      "description": "Greets a name deterministically.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+      },
+      "effects": ["clock.now", "kv.set", "kv.get", "log.write"],
+      "ui": "ui://hello"
+    }
+  ],
+  "ui": {
+    "app": { "resourceUri": "ui://hello", "path": "ui/index.html", "csp": { "connectDomains": [] } },
+    "local": { "path": "ui/index.html" }
+  }
+}

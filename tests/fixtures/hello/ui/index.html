@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hello Capsule</title>
+  </head>
+  <body>
+    <h1>Hello Capsule</h1>
+    <button id="go" type="button">Greet</button>
+    <output id="out"></output>
+    <!-- No inline event handlers and no remote scripts: the host serves this page under
+         script-src 'self'. The bridge that calls the greet tool is wired in later tasks. -->
+    <script type="module">
+      const out = document.getElementById("out");
+      document.getElementById("go").addEventListener("click", () => {
+        out.textContent = "host bridge not connected yet";
+      });
+    </script>
+  </body>
+</html>

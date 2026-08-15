@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
+import { packCommand } from "./commands/pack.ts";
 
 type Command = (argv: string[]) => Promise<number>;
-const COMMANDS = new Map<string, Command>();
+// Registered here rather than by later `set` calls: USAGE is built from this map at module load.
+const COMMANDS = new Map<string, Command>([["pack", packCommand]]);
 
 const USAGE = `usage: capsule <command> [options]
 
