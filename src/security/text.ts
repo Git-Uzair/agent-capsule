@@ -130,3 +130,37 @@ export function scanForInjection(s: string): string[] {
     return [];
   }
 }
+
+/**
+ * Every string at any depth of a JSON value, in document order. Model-facing text hides in a schema
+ * leaf as readily as in a description, so anything that screens a tool has to look at all of it.
+ */
+export function stringLeaves(value: unknown, out: string[] = []): string[] {
+  if (typeof value === "string") {
+    out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      stringLeaves(item, out);
+    }
+  } else if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) {
+      stringLeaves(item, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * The markers found anywhere in the given values, deduplicated and sorted so the same input always
+ * produces the same list. `capsule verify` and the MCP tool catalog share this on purpose: a capsule
+ * the verifier calls clean must be exactly the capsule whose tools are served.
+ */
+export function scanTextTree(values: readonly unknown[]): string[] {
+  const markers = new Set<string>();
+  for (const leaf of stringLeaves(values)) {
+    for (const marker of scanForInjection(leaf)) {
+      markers.add(marker);
+    }
+  }
+  return [...markers].sort();
+}

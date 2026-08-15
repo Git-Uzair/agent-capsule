@@ -1,6 +1,6 @@
 import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
-import { scanForInjection } from "../security/text.ts";
+import { scanTextTree } from "../security/text.ts";
 
 const USAGE = "usage: capsule verify <file> [--json] [--allow-suspicious] [--accept-drift]";
 
@@ -27,20 +27,6 @@ export type VerifyReport = {
   tools: { name: string; effects: string[]; markers: string[] }[];
   findings: VerifyFinding[];
 };
-
-function collectStringLeaves(val: unknown, out: string[]): void {
-  if (typeof val === "string") {
-    out.push(val);
-  } else if (Array.isArray(val)) {
-    for (const item of val) {
-      collectStringLeaves(item, out);
-    }
-  } else if (typeof val === "object" && val !== null) {
-    for (const v of Object.values(val)) {
-      collectStringLeaves(v, out);
-    }
-  }
-}
 
 export async function verifyCapsule(
   file: string,
@@ -80,20 +66,8 @@ export async function verifyCapsule(
   const tools: { name: string; effects: string[]; markers: string[] }[] = [];
 
   for (const tool of loaded.manifest.tools) {
-    const strings: string[] = [];
-    if (typeof tool.title === "string") strings.push(tool.title);
-    if (typeof tool.description === "string") strings.push(tool.description);
-    if (tool.inputSchema !== undefined) collectStringLeaves(tool.inputSchema, strings);
-    if (tool.outputSchema !== undefined) collectStringLeaves(tool.outputSchema, strings);
-
-    const markersSet = new Set<string>();
-    for (const s of strings) {
-      const detected = scanForInjection(s);
-      for (const m of detected) {
-        markersSet.add(m);
-      }
-    }
-    const markers = [...markersSet].sort();
+    // The same screen `capsule mcp` applies to the tool catalog, over the same text.
+    const markers = scanTextTree([tool.title, tool.description, tool.inputSchema, tool.outputSchema]);
     tools.push({
       name: tool.name,
       effects: [...tool.effects],
