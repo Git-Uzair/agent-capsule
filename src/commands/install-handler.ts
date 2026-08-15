@@ -1,30 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
+import { getDefaultCliPath } from "../core/paths.ts";
 
 const USAGE = "usage: capsule install-handler [--uninstall] [--dry-run] [--yes]";
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
-}
-
-export function getDefaultCliPath(): string {
-  // If running from dist/cli.js
-  const distCli = resolve(import.meta.dirname, "cli.js");
-  if (existsSync(distCli)) {
-    return distCli;
-  }
-  // If running from src/commands/
-  const fromSrcDist = resolve(import.meta.dirname, "..", "..", "dist", "cli.js");
-  if (existsSync(fromSrcDist)) {
-    return fromSrcDist;
-  }
-  const fromSrcTs = resolve(import.meta.dirname, "..", "cli.ts");
-  if (existsSync(fromSrcTs)) {
-    return fromSrcTs;
-  }
-  return resolve(import.meta.dirname, "..", "dist", "cli.js");
 }
 
 export function buildRegCommands(opts?: {

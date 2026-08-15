@@ -10,9 +10,9 @@ import {
   generateLinuxDesktopFile,
   generateLinuxMimeXml,
   generateMacPlist,
-  getDefaultCliPath,
   runInstallHandler,
 } from "../src/commands/install-handler.ts";
+import { getDefaultCliPath } from "../src/core/paths.ts";
 import {
   MCP_SCHEMA_URL,
   PLUGIN_SCHEMA_URL,

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
+import { getDefaultCliPath } from "../core/paths.ts";
 import { loadCapsule } from "../format/capsule.ts";
 import { packDeterministicZip, type ZipEntry } from "../format/container.ts";
 import { sanitizeModelText } from "../security/text.ts";
@@ -14,36 +15,20 @@ function usage(message: string): never {
 export type McpbEntry = ZipEntry;
 
 export function getDistRuntimePaths(customDistDir?: string): { cliJs: string; wasm: string } {
-  if (customDistDir) {
-    const cliJs = resolve(customDistDir, "cli.js");
-    const wasm = resolve(customDistDir, "emscripten-module.wasm");
-    if (existsSync(cliJs) && existsSync(wasm)) {
-      return { cliJs, wasm };
-    }
-    throw new CapsuleError("E_CONTAINER", `dist runtime bundle not found in ${customDistDir}`);
+  // The runtime bundle is wherever the CLI entry lives; scripts/build.js copies the
+  // Wasm asset beside it, so one existing lookup locates both files.
+  const distDir = customDistDir ?? dirname(getDefaultCliPath());
+  const cliJs = resolve(distDir, "cli.js");
+  const wasm = resolve(distDir, "emscripten-module.wasm");
+  if (existsSync(cliJs) && existsSync(wasm)) {
+    return { cliJs, wasm };
   }
-
-  // If running in dist/
-  const besideCli = resolve(import.meta.dirname, "cli.js");
-  const besideWasm = resolve(import.meta.dirname, "emscripten-module.wasm");
-  if (existsSync(besideCli) && existsSync(besideWasm)) {
-    return { cliJs: besideCli, wasm: besideWasm };
-  }
-
-  // If running from src/commands/
-  const rootDistCli = resolve(import.meta.dirname, "..", "..", "dist", "cli.js");
-  const rootDistWasm = resolve(import.meta.dirname, "..", "..", "dist", "emscripten-module.wasm");
-  if (existsSync(rootDistCli) && existsSync(rootDistWasm)) {
-    return { cliJs: rootDistCli, wasm: rootDistWasm };
-  }
-
-  const parentDistCli = resolve(import.meta.dirname, "..", "dist", "cli.js");
-  const parentDistWasm = resolve(import.meta.dirname, "..", "dist", "emscripten-module.wasm");
-  if (existsSync(parentDistCli) && existsSync(parentDistWasm)) {
-    return { cliJs: parentDistCli, wasm: parentDistWasm };
-  }
-
-  throw new CapsuleError("E_CONTAINER", "dist runtime bundle not found (run npm run build first)");
+  throw new CapsuleError(
+    "E_CONTAINER",
+    customDistDir
+      ? `dist runtime bundle not found in ${customDistDir}`
+      : "dist runtime bundle not found (run npm run build first)",
+  );
 }
 
 export function getDefaultIconPath(customIconPath?: string): string {
@@ -52,17 +37,13 @@ export function getDefaultIconPath(customIconPath?: string): string {
     throw new CapsuleError("E_CONTAINER", `icon file not found at ${customIconPath}`);
   }
 
-  const beside = resolve(import.meta.dirname, "icon.png");
-  if (existsSync(beside)) return beside;
+  // scripts/build.js copies assets/icon.png beside the CLI bundle; running from
+  // source (no build yet) falls back to the repository asset.
+  const besideCli = resolve(dirname(getDefaultCliPath()), "icon.png");
+  if (existsSync(besideCli)) return besideCli;
 
-  const besideAssets = resolve(import.meta.dirname, "assets", "icon.png");
-  if (existsSync(besideAssets)) return besideAssets;
-
-  const rootAssets = resolve(import.meta.dirname, "..", "..", "assets", "icon.png");
-  if (existsSync(rootAssets)) return rootAssets;
-
-  const parentAssets = resolve(import.meta.dirname, "..", "assets", "icon.png");
-  if (existsSync(parentAssets)) return parentAssets;
+  const repoAsset = resolve(import.meta.dirname, "..", "..", "assets", "icon.png");
+  if (existsSync(repoAsset)) return repoAsset;
 
   throw new CapsuleError("E_CONTAINER", "default icon.png not found");
 }
