@@ -1,10 +1,12 @@
 import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
-import { invokeTool, type InvokeResult } from "../runtime/invoke.ts";
+import { invokeTool, sidecarPaths, type InvokeResult } from "../runtime/invoke.ts";
+import { openJournal } from "../runtime/journal.ts";
+import { exportTrace } from "../runtime/trace.ts";
 
 const USAGE =
   "usage: capsule run <file> --tool <name> [--args '<json>'] [--json] " +
-  "[--state <path>] [--journal <path>] [--accept-drift]";
+  "[--state <path>] [--journal <path>] [--accept-drift] [--trace]";
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
@@ -27,6 +29,7 @@ export async function runCommand(argv: string[]): Promise<number> {
   let statePath: string | undefined;
   let journalPath: string | undefined;
   let acceptDrift = false;
+  let trace = false;
 
   const valueOf = (arg: string, next: string | undefined): string =>
     next === undefined ? usage(`${arg} needs a value`) : next;
@@ -45,6 +48,8 @@ export async function runCommand(argv: string[]): Promise<number> {
       json = true;
     } else if (arg === "--accept-drift") {
       acceptDrift = true;
+    } else if (arg === "--trace") {
+      trace = true;
     } else if (arg.startsWith("-")) {
       usage(`unknown option: ${arg}`);
     } else if (file === undefined) {
@@ -75,7 +80,24 @@ export async function runCommand(argv: string[]): Promise<number> {
     ...(journalPath === undefined ? {} : { journalPath }),
   });
 
-  report(result, json);
+  if (trace && result.events > 0) {
+    const journalFile = journalPath ?? sidecarPaths(capsule.file).journal;
+    const journal = openJournal(journalFile);
+    try {
+      const traceExport = exportTrace({
+        journal,
+        runId: result.runId,
+        capsuleName: capsule.manifest.meta.name,
+        capsuleVersion: capsule.manifest.meta.version,
+      });
+      process.stdout.write(`${JSON.stringify(traceExport, null, json ? undefined : 2)}\n`);
+    } finally {
+      journal.close();
+    }
+  } else {
+    report(result, json);
+  }
+
   return result.ok ? 0 : 1;
 }
 
