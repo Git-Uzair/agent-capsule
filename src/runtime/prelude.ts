@@ -19,6 +19,7 @@ export const PRELUDE = `(() => {
   const g = globalThis;
   const stringify = JSON.stringify;
   const parse = JSON.parse;
+  const apply = Reflect.apply;
   const raw = g.__capsule;
   const tool = g.__tool;
   const argsJson = g.__args;
@@ -57,6 +58,17 @@ export const PRELUDE = `(() => {
     return args.length ? new RealDate(...args) : new RealDate(now());
   };
   CapsuleDate.prototype = RealDate.prototype;
+  // Sharing the prototype is what keeps \`new Date() instanceof Date\` true, but it also means the
+  // prototype still names the real constructor — and a constructor is a clock:
+  // \`new (Date.prototype.constructor)()\` and \`Date.prototype.constructor.now()\` would read the host's
+  // wall clock through a property every date instance carries. Renaming it closes the last way to the
+  // real \`Date\`, since the global binding is the only other one and the closure keeps its own.
+  CapsuleDate.prototype.constructor = CapsuleDate;
+  // The zone is the other half of a timestamp: the same instant is a different local time on two
+  // machines, so under strict determinism the guest is always at UTC.
+  RealDate.prototype.getTimezoneOffset = function () {
+    return 0;
+  };
   CapsuleDate.now = () => new RealDate(now()).getTime();
   CapsuleDate.parse = RealDate.parse;
   CapsuleDate.UTC = RealDate.UTC;
@@ -69,9 +81,14 @@ export const PRELUDE = `(() => {
   // have: its own tool, called with the arguments it was going to be given.
   Object.defineProperty(g, "__capsule_invoke", {
     value: () => {
-      const fn = g.tools && g.tools[tool];
+      const tools = g.tools;
+      const fn = tools && tools[tool];
       if (typeof fn !== "function") return stringify({ status: "no_tool" });
-      const value = fn(parse(argsJson)) ?? null;
+      // Called as a method of the tool table, exactly as \`tools[name](args)\` would be: a tool is
+      // allowed to be a method that reaches a sibling through \`this\`. The receiver goes through the
+      // captured \`Reflect.apply\` rather than \`fn.call\`, so a capsule that rewrote
+      // \`Function.prototype.call\` cannot get between the host and its own tool.
+      const value = apply(fn, tools, [parse(argsJson)]) ?? null;
       let json;
       try {
         json = stringify(value);

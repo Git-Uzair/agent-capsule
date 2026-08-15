@@ -93,6 +93,45 @@ test("Date.now() and new Date() come from the clock port", async () => {
   );
 });
 
+test("Date reached through its prototype is still the clock port", async () => {
+  // `Date` is reachable by more than its global name: every date instance's prototype names its
+  // constructor, and that reference has to be the port's clock too, or the host's wall clock is one
+  // property read away. The zone is part of the same answer — a host offset would make the same
+  // instant format differently on two machines.
+  const port = recorder();
+  const value = await run(
+    `globalThis.tools = {
+       greet: () => ({
+         constructed: new (Date.prototype.constructor)().getTime(),
+         statically: Date.prototype.constructor.now(),
+         offset: new Date().getTimezoneOffset(),
+       }),
+     };`,
+    { dispatch: port.dispatch },
+  );
+
+  assert.deepEqual(value, { constructed: CLOCK_MS, statically: CLOCK_MS, offset: 0 });
+  assert.deepEqual(
+    port.calls.map((call) => call.op),
+    ["clock.now", "clock.now", "clock.now"],
+  );
+});
+
+test("a tool written as a method keeps its receiver", async () => {
+  // The tool table is an object, so a tool may be a method that reaches a sibling through `this`.
+  const value = await run(
+    `globalThis.tools = {
+       helper() { return 1; },
+       greet() {
+         if (this !== globalThis.tools) throw new Error("receiver was not the tool table");
+         return { ok: this.helper() };
+       },
+     };`,
+  );
+
+  assert.deepEqual(value, { ok: 1 });
+});
+
 test("Math.random() is deterministic across two runs", async () => {
   const source = `globalThis.tools = { greet: () => [Math.random(), capsule.random(4)] };`;
   const first = recorder();
