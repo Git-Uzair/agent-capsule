@@ -1106,10 +1106,12 @@ in the cwd; prints the summary as one JSON line on stdout.
 
 ## Task 8 — Hostile-text hardening for everything a model can read
 
-**Status:** In Progress (Failed Verify Cycles: 1)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 8 implementation -> verifier FAIL (surrogate pair split on truncation, unbounded input length in scanForInjection causing regex ReDoS)
-- attempt 2: back up boundary on high surrogate and bound scanForInjection input to 8192 chars -> pending verify
+- attempt 2: back up boundary on high surrogate and bound scanForInjection input to 8192 chars -> verifier FAIL (truncating to 8192 bypassed injection detection on markers past offset 8192, negative max handling, unpaired surrogate handling, non-pinning ReDoS test)
+- attempt 3: bound regex gap spans to {0,120} -> verifier FAIL (missed long-gap markers with >120 chars between tokens, e.g. long URL or args)
+- attempt 4 (opus-coder): orderedTokens linear predicate checking with O(N) time, zero backtracking, unbounded gap distance -> verifier PASS
 
 **Goal:** treat capsule-authored strings as attacker-controlled input to the *recipient's agent*.
 **Difficulty:** EASY · *parallelizable with task 7*

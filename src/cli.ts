@@ -2,10 +2,14 @@
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { packCommand } from "./commands/pack.ts";
+import { verifyCommand } from "./commands/verify.ts";
 
 type Command = (argv: string[]) => Promise<number>;
 // Registered here rather than by later `set` calls: USAGE is built from this map at module load.
-const COMMANDS = new Map<string, Command>([["pack", packCommand]]);
+const COMMANDS = new Map<string, Command>([
+  ["pack", packCommand],
+  ["verify", verifyCommand],
+]);
 
 const USAGE = `usage: capsule <command> [options]
 
