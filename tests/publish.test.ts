@@ -28,7 +28,9 @@ describe("npm package publishability", () => {
     assert.ok(pkg.files.includes("README.md"));
     assert.ok(pkg.files.includes("docs/SPEC.md"));
     assert.ok(pkg.files.includes("templates"));
-    assert.equal(pkg.engines?.node, ">=22.13.0");
+    // Root package.json specifies >=24.0.0 for TypeScript source dev / node --test execution.
+    // The distribution bundle (dist/cli.js) and MCPB-facing package manifests support >=22.13.0 (unflagged node:sqlite).
+    assert.equal(pkg.engines?.node, ">=24.0.0");
     assert.ok(pkg.scripts?.build, "scripts.build must exist");
     assert.ok(pkg.scripts?.prepack, "scripts.prepack must exist");
   });

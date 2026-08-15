@@ -77,6 +77,11 @@ These facts were established by direct inspection on 2026-08-15/16; the plan's d
 Work top to bottom; each phase is releasable on its own. Keep the existing test suite green (326 tests as of `0a19bac`) and add tests as specified. Follow the repo's comment style (rationale-bearing, no narration).
 
 ### P0 — Build & packaging foundation
+Status: in_progress
+Failed verify cycles: 1
+Attempt ledger:
+- attempt 1: initial P0 implementation -> FAIL (install-handler pointing to src/cli.ts instead of dist/cli.js, package-lock.json out of sync, root engines split)
+
 
 **P0-1. esbuild bundling.**
 - Add `esbuild` as a devDependency and a `scripts.build` producing `dist/cli.js` (ESM, `platform: node`, `target: node22`, single file + emitted asset files).

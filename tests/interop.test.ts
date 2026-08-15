@@ -10,6 +10,7 @@ import {
   generateLinuxDesktopFile,
   generateLinuxMimeXml,
   generateMacPlist,
+  getDefaultCliPath,
   runInstallHandler,
 } from "../src/commands/install-handler.ts";
 import {
@@ -443,6 +444,17 @@ test("buildRegCommands returns expected argv arrays for install and uninstall", 
   assert.equal(uninstallCmds.length, 2);
   assert.deepEqual(uninstallCmds[0], ["delete", "HKCU\\Software\\Classes\\.capsule", "/f"]);
   assert.deepEqual(uninstallCmds[1], ["delete", "HKCU\\Software\\Classes\\AgentCapsule.File", "/f"]);
+
+  const defaultCli = getDefaultCliPath();
+  assert.ok(existsSync(defaultCli), `default CLI path ${defaultCli} should exist`);
+  assert.ok(defaultCli.endsWith("cli.js") || defaultCli.endsWith("cli.ts"));
+
+  const defaultCmds = buildRegCommands();
+  assert.equal(defaultCmds.length, 3);
+  const openCmd = defaultCmds[2];
+  assert.ok(openCmd);
+  const cmdStr = openCmd[4];
+  assert.ok(cmdStr && cmdStr.includes(defaultCli));
 });
 
 test("generateLinuxDesktopFile and generateLinuxMimeXml return valid configs", () => {

@@ -100,6 +100,22 @@ describe("Distribution bundle (dist/cli.js)", () => {
       assert.equal(runRes.status, 0, `Run command failed: ${runRes.stderr}`);
       assert.match(runRes.stdout, /"text": "hello CleanEnv"/);
       assert.match(runRes.stderr, /ok in \d+ms/);
+
+      // 5. install-handler dry-run targets dist/cli.js (not missing cli.ts)
+      const ihRes = spawnSync(
+        process.execPath,
+        [isolatedCli, "install-handler"],
+        {
+          cwd: sandbox,
+          encoding: "utf8",
+          env,
+        },
+      );
+      assert.equal(ihRes.status, process.platform === "win32" ? 0 : 2);
+      if (process.platform === "win32") {
+        assert.match(ihRes.stdout, /cli\.js/);
+        assert.doesNotMatch(ihRes.stdout, /cli\.ts/);
+      }
     } finally {
       rmSync(sandbox, { recursive: true, force: true });
     }

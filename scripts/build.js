@@ -10,7 +10,11 @@ import * as esbuild from "esbuild";
  *
  * Engine Support Split:
  * - TypeScript source dev / testing: Node.js >= 24.0.0 (uses built-in TypeScript type-stripping).
- * - Distribution bundle (dist/cli.js): Node.js >= 22.13.0 (the minimum version for unflagged node:sqlite).
+ * - Distribution bundle (dist/cli.js) / MCPB standalone: Node.js >= 22.13.0 (the minimum version for unflagged node:sqlite).
+ *
+ * Root package.json declares "engines": { "node": ">=24.0.0" } to ensure contributors and
+ * developers run Node >=24 for native TS execution. The packaged standalone distribution bundle
+ * (dist/cli.js) and MCPB-facing package manifests support Node >=22.13.0.
  *
  * This build produces a standalone ESM bundle in dist/cli.js and places the QuickJS Wasm
  * asset beside it at dist/emscripten-module.wasm so that the packaged CLI can run offline

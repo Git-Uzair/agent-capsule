@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 
@@ -8,13 +9,31 @@ function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
 }
 
+export function getDefaultCliPath(): string {
+  // If running from dist/cli.js
+  const distCli = resolve(import.meta.dirname, "cli.js");
+  if (existsSync(distCli)) {
+    return distCli;
+  }
+  // If running from src/commands/
+  const fromSrcDist = resolve(import.meta.dirname, "..", "..", "dist", "cli.js");
+  if (existsSync(fromSrcDist)) {
+    return fromSrcDist;
+  }
+  const fromSrcTs = resolve(import.meta.dirname, "..", "cli.ts");
+  if (existsSync(fromSrcTs)) {
+    return fromSrcTs;
+  }
+  return resolve(import.meta.dirname, "..", "dist", "cli.js");
+}
+
 export function buildRegCommands(opts?: {
   nodePath?: string;
   cliPath?: string;
   uninstall?: boolean;
 }): string[][] {
   const node = opts?.nodePath ?? process.execPath;
-  const cli = opts?.cliPath ?? resolve(import.meta.dirname, "..", "cli.ts");
+  const cli = opts?.cliPath ?? getDefaultCliPath();
 
   if (opts?.uninstall) {
     return [
@@ -39,7 +58,7 @@ export function buildRegCommands(opts?: {
 
 export function generateLinuxDesktopFile(opts?: { nodePath?: string; cliPath?: string }): string {
   const node = opts?.nodePath ?? process.execPath;
-  const cli = opts?.cliPath ?? resolve(import.meta.dirname, "..", "cli.ts");
+  const cli = opts?.cliPath ?? getDefaultCliPath();
 
   return `[Desktop Entry]
 Type=Application
@@ -65,7 +84,7 @@ export function generateLinuxMimeXml(): string {
 
 export function generateMacPlist(opts?: { nodePath?: string; cliPath?: string }): string {
   const node = opts?.nodePath ?? process.execPath;
-  const cli = opts?.cliPath ?? resolve(import.meta.dirname, "..", "cli.ts");
+  const cli = opts?.cliPath ?? getDefaultCliPath();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
