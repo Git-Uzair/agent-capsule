@@ -63,7 +63,7 @@ export type McpServer = {
 };
 
 /** The capability sentence in `instructions`: what this capsule may do, in the user's terms. */
-function declaredCapabilities(manifest: Manifest): string {
+export function declaredCapabilities(manifest: Manifest): string {
   const capabilities = manifest.capabilities;
   const declared: string[] = [];
   if (capabilities.sql) declared.push("sql");

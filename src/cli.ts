@@ -7,6 +7,7 @@ import { exportMcpbCommand } from "./commands/export-mcpb.ts";
 import { exportPluginCommand } from "./commands/export-plugin.ts";
 import { injectCommand } from "./commands/inject.ts";
 import { installHandlerCommand } from "./commands/install-handler.ts";
+import { managerCommand } from "./commands/manager.ts";
 import { mcpCommand } from "./commands/mcp.ts";
 import { packCommand } from "./commands/pack.ts";
 import { replayCommand } from "./commands/replay.ts";
@@ -26,6 +27,7 @@ const COMMANDS = new Map<string, Command>([
   ["conformance", conformanceCommand],
   ["inject", injectCommand],
   ["install-handler", installHandlerCommand],
+  ["manager", managerCommand],
   ["export-plugin", exportPluginCommand],
   ["export-mcpb", exportMcpbCommand],
 ]);
