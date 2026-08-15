@@ -57,9 +57,12 @@ export function sidecarPaths(file: string): { app: string; journal: string } {
 /**
  * Validates a value against one of the manifest's schemas and reports why it failed, or nothing at
  * all. A schema comes from the capsule author, so it is not assumed to be a schema: ajv rejecting it
- * is the manifest's fault and is said so, rather than escaping as an ajv error.
+ * is the manifest's fault and is said so, rather than escaping as an ajv error. Exported because the
+ * MCP `tools/call` handler screens arguments before it invokes anything — the MCP revision makes
+ * arguments that fail `inputSchema` a protocol error rather than a tool that ran and failed — and it
+ * must judge them exactly as the run itself would.
  */
-function schemaErrors(schema: Record<string, unknown>, value: unknown): string | undefined {
+export function schemaErrors(schema: Record<string, unknown>, value: unknown): string | undefined {
   const ajv = newValidator();
   let validate: ValidateFunction;
   try {

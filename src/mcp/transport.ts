@@ -44,6 +44,20 @@ export const JSON_RPC_ERROR = {
   InternalError: -32603,
 } as const;
 
+/**
+ * A failure with a JSON-RPC code already chosen. Anything else a handler throws is ours, not the
+ * peer's, and becomes an internal error with no detail on the wire. It lives beside the codes rather
+ * than in the server, because the handlers that raise it are in files of their own.
+ */
+export class RpcFailure extends Error {
+  readonly code: number;
+  constructor(code: number, message: string) {
+    super(message);
+    this.name = "RpcFailure";
+    this.code = code;
+  }
+}
+
 export type Transport = {
   onMessage(handler: (msg: JsonRpcMessage) => void | Promise<void>): void;
   send(msg: JsonRpcMessage): void;

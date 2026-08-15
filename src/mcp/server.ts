@@ -2,17 +2,17 @@ import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { LoadedCapsule } from "../format/capsule.ts";
 import type { Manifest } from "../format/manifest.ts";
-import { invokeTool } from "../runtime/invoke.ts";
 import type { GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
+import { handleToolsCall, type McpServerContext } from "./call.ts";
 import { assertNoToolNameCollision, buildToolList, isTextMimeType, listResources } from "./catalog.ts";
-import { parseMeta, type Meta } from "./meta.ts";
 import {
   JSON_RPC_ERROR,
   type JsonRpcErrorResponse,
   type JsonRpcId,
   type JsonRpcMessage,
   type JsonRpcResponse,
+  RpcFailure,
   type Transport,
 } from "./transport.ts";
 
@@ -26,9 +26,6 @@ const UI_MIME_TYPE = "text/html;profile=mcp-app";
 const CATALOG_TTL_MS = 3_600_000;
 /** Capsule content is immutable by construction — the statement digest covers it — so one day. */
 const CONTENT_TTL_MS = 86_400_000;
-
-/** How much of a failure message a caller — ultimately a model's context — is given. */
-const MAX_MESSAGE_CHARS = 500;
 
 const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
 const UI_EXTENSION = "io.modelcontextprotocol/ui";
@@ -51,19 +48,6 @@ export type McpServer = {
   serve(transport: Transport): void;
 };
 
-/**
- * A failure with a JSON-RPC code already chosen. Anything else a handler throws is ours, not the
- * peer's, and becomes an internal error with no detail on the wire.
- */
-class RpcFailure extends Error {
-  readonly code: number;
-  constructor(code: number, message: string) {
-    super(message);
-    this.name = "RpcFailure";
-    this.code = code;
-  }
-}
-
 /** The capability sentence in `instructions`: what this capsule may do, in the user's terms. */
 function declaredCapabilities(manifest: Manifest): string {
   const capabilities = manifest.capabilities;
@@ -74,24 +58,6 @@ function declaredCapabilities(manifest: Manifest): string {
   const hosts = [...capabilities.net.allowed_hosts, ...(capabilities.net.allow_localhost ? ["localhost"] : [])];
   if (hosts.length > 0) declared.push(`net(${hosts.join(", ")})`);
   return declared.length === 0 ? "none" : declared.join(", ");
-}
-
-/**
- * Who asked, as far as the caller chose to say. A host runs one capsule for many agents, so a
- * failure nobody can attribute is a failure nobody can chase; both fields are already validated by
- * `parseMeta` — the caller name is sanitised there and the traceparent matched against its
- * pattern — which is what makes them safe to write to a terminal.
- */
-function attribution(meta: Meta | undefined): string {
-  const parts: string[] = [];
-  if (meta?.caller !== undefined) parts.push(`caller=${meta.caller.name}`);
-  if (meta?.traceparent !== undefined) parts.push(`traceparent=${meta.traceparent}`);
-  return parts.length === 0 ? "" : ` (${parts.join(" ")})`;
-}
-
-/** The one content shape this server produces: text, cleaned before it reaches a model. */
-function textContent(value: string): Record<string, unknown> {
-  return { type: "text", text: value };
 }
 
 export function createMcpServer(opts: McpServerOptions): McpServer {
@@ -108,19 +74,25 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
   assertNoToolNameCollision(manifest.tools.map((tool) => tool.name));
   const tools = buildToolList(manifest, { allowSuspicious: opts.allowSuspicious === true, warn });
   const resources = listResources(manifest);
-  // Suppression is a decision about a tool, not about the list it would have appeared in: a tool the
-  // catalog refused to serve must not be reachable by name either. `allowSuspicious` serves every
-  // tool, so this set is then empty.
-  const suppressed = new Set(
-    manifest.tools
-      .map((tool) => tool.name)
-      .filter((name) => !tools.some((served) => served.name === name)),
-  );
 
   const serverInfo = { name: manifest.meta.name, version: manifest.meta.version };
   // The `_meta` name is namespaced (`capsule/<name>`) so an agent talking to several servers can tell
   // a capsule from a native MCP server; the `serverInfo`/`server` fields carry the capsule's own name.
   const resultMeta = { [SERVER_INFO_META]: { name: `capsule/${serverInfo.name}`, version: serverInfo.version } };
+
+  // Everything `tools/call` is allowed to know, settled once. The served names are the catalog's own,
+  // so a tool suppressed for suspicious text is not callable by name either — suppression is a
+  // decision about the tool, not about the list it would have appeared in.
+  const ctx: McpServerContext = {
+    capsule,
+    served: new Set(tools.map((tool) => tool.name)),
+    grants: opts.grants,
+    statePath: opts.statePath,
+    journalPath: opts.journalPath,
+    homeDir: opts.homeDir,
+    warn,
+    resultMeta,
+  };
 
   const result = (body: Record<string, unknown>, meta?: Record<string, unknown>): Record<string, unknown> => ({
     resultType: "complete",
@@ -171,73 +143,6 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     });
   }
 
-  /**
-   * One tool call, all the way through `invokeTool` — the same path the CLI takes, so the security
-   * model is not re-decided here. What *is* decided here is which failures are the peer's protocol
-   * mistake and which are an outcome the model has to read: a name that is not a string and
-   * arguments that are not an object are JSON-RPC errors, while a tool that does not exist, was
-   * refused, threw or timed out is a `complete` result carrying `isError` — a model that receives a
-   * transport error learns nothing it can act on, and MCP requires tool failures in the result.
-   *
-   * Every refusal names the run it did not perform: `runId` is what ties a result to the journal, so
-   * it is reported for a refused call too, where the journal holds nothing under it.
-   */
-  async function callTool(params: unknown): Promise<Record<string, unknown>> {
-    const request = asRecord(params);
-    const name = request?.["name"];
-    if (typeof name !== "string" || name === "") {
-      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call needs a non-empty string name");
-    }
-    const rawArgs = request?.["arguments"];
-    const args = rawArgs === undefined ? undefined : asRecord(rawArgs);
-    if (rawArgs !== undefined && args === undefined) {
-      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call arguments must be an object");
-    }
-    const meta = parseMeta(params);
-
-    if (suppressed.has(name)) {
-      // Deliberately not a JSON-RPC error: the client asked for a tool this server knows about and
-      // will not serve, and that is an answer, not a malformed request.
-      return result({ content: [textContent("tool is suppressed due to suspicious content")], isError: true });
-    }
-
-    const res = await invokeTool({
-      capsule: opts.capsule,
-      tool: name,
-      args: args ?? {},
-      grants: opts.grants,
-      statePath: opts.statePath,
-      journalPath: opts.journalPath,
-      homeDir: opts.homeDir,
-    });
-
-    if (res.ok) {
-      // The value is already sanitised and capped by the run itself, so it is serialised as it
-      // stands: a string is its own text, anything else is its JSON.
-      return result(
-        {
-          content: [textContent(typeof res.value === "string" ? res.value : JSON.stringify(res.value))],
-          isError: false,
-        },
-        { runId: res.runId, effects: res.effects, events: res.events },
-      );
-    }
-
-    const code = res.error?.code ?? "ERROR";
-    const message = sanitizeModelText(res.error?.message ?? "invocation failed", MAX_MESSAGE_CHARS);
-    // The tool name came off the wire, so it is cleaned before it reaches somebody's terminal.
-    warn(`tools/call ${sanitizeModelText(name, 120)} failed: ${code}${attribution(meta)}`);
-    return result(
-      {
-        // A missing grant is the one failure a human can fix, so it is phrased as the request it is
-        // rather than as an error code the model is left to interpret.
-        content: [textContent(code === "E_POLICY" ? `Permission denied: ${message}` : `${code}: ${message}`)],
-        isError: true,
-      },
-      { code, runId: res.runId },
-    );
-  }
-
   const handlers = new Map<string, (params: unknown) => Record<string, unknown> | Promise<Record<string, unknown>>>([
     [
       "initialize",
@@ -263,7 +168,9 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
         }),
     ],
     ["tools/list", () => result({ tools, ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
-    ["tools/call", callTool],
+    // The one handler that may answer something other than a `complete` result: a call the user has
+    // not yet consented to comes back as `input_required`.
+    ["tools/call", (params) => handleToolsCall(params, ctx)],
     ["resources/list", () => result({ resources, ttlMs: CONTENT_TTL_MS, cacheScope: "public" })],
     ["resources/read", readResource],
     ["ping", () => result({})],
