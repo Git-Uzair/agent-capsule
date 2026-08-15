@@ -55,6 +55,9 @@ function formatHumanReport(report: ConformanceReport): void {
   }
 
   const verdict = report.ok ? "PASS" : "FAIL";
+  lines.push(
+    `vectors: ${report.total} total, ${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped`,
+  );
   lines.push(`${verdict} (${report.errors} error, ${report.warnings} warn)`);
   process.stdout.write(`${lines.join("\n")}\n`);
 }

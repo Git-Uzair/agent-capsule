@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { asRecord } from "../core/canonical.ts";
 import { digestOf, sha256Hex } from "../core/digest.ts";
 import { CapsuleError } from "../core/errors.ts";
 import { newValidator } from "../core/schema.ts";
@@ -12,10 +13,9 @@ import {
   type LoadedCapsule,
 } from "../format/capsule.ts";
 import { openContainer, packEntries, type CapsuleEntry, type CapsuleReader } from "../format/container.ts";
-import { EFFECT_CAPABILITY, type Manifest, type ManifestTool } from "../format/manifest.ts";
+import { type Manifest, type ManifestTool } from "../format/manifest.ts";
 import { toolCatalogDigest, verifyStatement, type Statement, type StatementFile } from "../format/statement.ts";
 import { schemaErrors, type InvokeOptions, type InvokeResult } from "../runtime/invoke.ts";
-import { hostAllowed, hostOf } from "../runtime/policy.ts";
 import type { ReplayOptions, ReplayResult } from "../runtime/replay.ts";
 import { keyIdOf, verifySignature, type SignatureDoc } from "../security/signing.ts";
 import { confusableSkeleton, scanTextTree } from "../security/text.ts";
@@ -31,6 +31,16 @@ const RSS_BUDGET_MIB = 128;
 
 /** C12: the per-operation ceilings the host holds itself to, measured only under `--perf`. */
 export const PERF_BUDGETS_MS = { pack: 500, verify: 200, invoke: 500, replay: 200 } as const;
+
+/**
+ * Every ceiling in the suite, carried by the report whether or not this run measured against it: a
+ * `--json` consumer that reads a duration needs the number it was judged by from the same document.
+ */
+export const CONFORMANCE_BUDGETS: Record<string, number> = {
+  cold: COLD_BUDGET_MS,
+  rssMiB: RSS_BUDGET_MIB,
+  ...PERF_BUDGETS_MS,
+};
 
 export type ConformanceSeverity = "error" | "warn";
 export type ConformanceStatus = "pass" | "fail" | "skip";
@@ -63,7 +73,14 @@ export type ConformanceReport = {
   selfTest: boolean;
   results: ConformanceResult[];
   measurements: ConformanceMeasurement[];
+  budgets: Record<string, number>;
   rssDeltaMiB: number;
+  /** The counts a caller reads first. `total` is `results.length`; `passed + failed + skipped` is it. */
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  /** Of the failures: how many were graded `error` (which decides `ok`) and how many `warn`. */
   errors: number;
   warnings: number;
 };
@@ -157,33 +174,59 @@ function invokableTool(manifest: Manifest): { tool: ManifestTool; args: unknown 
 }
 
 /**
- * The maximum object nesting and the number of subschema positions in a schema. Counted over the JSON
- * document rather than over the keywords: the bound exists to stop a validator being handed a
- * pathological composition, and every object in a schema document is a position a validator has to
- * walk whether this host knows the keyword that holds it or not.
+ * The keyword positions a subschema can occupy in JSON Schema 2020-12 (plus the two draft-07 spellings
+ * a hand-written schema still arrives with): one subschema, a map of them, or an array of them. Every
+ * other keyword holds data — `examples`, `default`, `const`, `enum` — and no amount of nesting inside
+ * one of those is composition a validator has to walk.
  */
-function shapeOf(value: unknown, depth = 1): { depth: number; subschemas: number } {
-  if (Array.isArray(value)) {
-    let deepest = depth;
-    let subschemas = 0;
-    for (const item of value) {
-      const shape = shapeOf(item, depth + 1);
-      deepest = Math.max(deepest, shape.depth);
-      subschemas += shape.subschemas;
+const SUBSCHEMA_KEYWORDS = [
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+];
+const SUBSCHEMA_MAP_KEYWORDS = ["$defs", "definitions", "dependentSchemas", "patternProperties", "properties"];
+const SUBSCHEMA_LIST_KEYWORDS = ["allOf", "anyOf", "oneOf", "prefixItems"];
+
+/**
+ * How deep a schema's subschemas nest, and how many of them there are. Depth is counted in subschemas
+ * rather than in JSON objects: `{properties: {a: {properties: {b: …}}}}` is two levels of composition,
+ * not four, because the `properties` object is the keyword's value and not a schema in its own right.
+ * The bound exists to stop a validator being handed a pathological *composition*, so counting the
+ * document's object nesting instead would fail schemas an author would reasonably write — and would
+ * count an `examples[0]` value, which is data, as composition.
+ *
+ * A `true`/`false` schema is a subschema at the position it sits in, which is why the recursion counts
+ * the value it was handed before asking whether it has keywords.
+ */
+function shapeOf(schema: unknown, depth = 1): { depth: number; subschemas: number } {
+  const shape = { depth, subschemas: 1 };
+  const keywords = asRecord(schema);
+  if (keywords === undefined) return shape;
+
+  const descend = (value: unknown): void => {
+    const inner = shapeOf(value, depth + 1);
+    shape.depth = Math.max(shape.depth, inner.depth);
+    shape.subschemas += inner.subschemas;
+  };
+  for (const [keyword, value] of Object.entries(keywords)) {
+    if (SUBSCHEMA_MAP_KEYWORDS.includes(keyword)) {
+      for (const subschema of Object.values(asRecord(value) ?? {})) descend(subschema);
+    } else if (SUBSCHEMA_LIST_KEYWORDS.includes(keyword) || SUBSCHEMA_KEYWORDS.includes(keyword)) {
+      // `items` is a single subschema in 2020-12 and a tuple in draft-07; both spellings are walked.
+      if (Array.isArray(value)) for (const subschema of value) descend(subschema);
+      else descend(value);
     }
-    return { depth: deepest, subschemas };
   }
-  if (typeof value === "object" && value !== null) {
-    let deepest = depth;
-    let subschemas = 1;
-    for (const item of Object.values(value)) {
-      const shape = shapeOf(item, depth + 1);
-      deepest = Math.max(deepest, shape.depth);
-      subschemas += shape.subschemas;
-    }
-    return { depth: deepest, subschemas };
-  }
-  return { depth: depth - 1, subschemas: 0 };
+  return shape;
 }
 
 /** Runs `body` with argument journalling on, which is what a replay of the run needs. */
@@ -374,7 +417,14 @@ export const CONFORMANCE_VECTORS: readonly ConformanceVector[] = [
     async run(ctx) {
       const { statement, signature } = ctx;
       if (statement === undefined || signature === undefined) {
-        return skip(ctx.docsError ?? "the capsule carries no signature");
+        // Not a skip. Whether the container is signed at all is precisely what this vector asks, so an
+        // unsigned capsule is a failed answer to it; skipping here would let a container nobody signed
+        // conform with zero errors, which is the one verdict this suite must never reach.
+        if (!ctx.reader.has(STATEMENT_PATH) || !ctx.reader.has(SIGNATURE_PATH)) {
+          return fail("capsule is unsigned (missing statement or signature)");
+        }
+        // Both documents are there but one of them did not read as what it claims to be.
+        return fail(ctx.docsError ?? "the signature could not be read");
       }
       const derived = keyIdOf(Buffer.from(signature.publicKey, "base64"));
       if (derived !== signature.keyId) {
@@ -402,10 +452,12 @@ export const CONFORMANCE_VECTORS: readonly ConformanceVector[] = [
     async run(ctx) {
       const manifest = ctx.manifest;
       if (manifest === undefined) return fail(ctx.manifestError ?? "capsule.json is not a valid manifest");
+      // A manifest that parsed has already been held to the schema, to the reserved `capsule_*` prefix
+      // and to unique names by `parseManifest`, so re-checking those here would be a second copy of
+      // rules that can only drift from the enforced ones. Confusables are this vector's own work: two
+      // names a model cannot tell apart are one name as far as a caller is concerned.
       const bySkeleton = new Map<string, string>();
       for (const tool of manifest.tools) {
-        if (tool.name.startsWith("capsule_")) return fail(`reserved tool name: ${tool.name}`);
-        // Two names a model cannot tell apart are one name as far as a caller is concerned.
         const skeleton = confusableSkeleton(tool.name);
         const clash = bySkeleton.get(skeleton);
         if (clash !== undefined) {
@@ -458,26 +510,19 @@ export const CONFORMANCE_VECTORS: readonly ConformanceVector[] = [
     async run(ctx) {
       const manifest = ctx.manifest;
       if (manifest === undefined) return skip(ctx.manifestError ?? "capsule.json is not a valid manifest");
+      // Containment is enforced in one place — `parseManifest`'s `assertSemantics`: every effect against
+      // its capability flag, `net.fetch` against an allowed host, and `ui.app.csp.connectDomains`
+      // against `capabilities.net`. A manifest that reaches this vector has passed all three (a
+      // manifest that failed one of them has no `ctx.manifest` at all, and C04 reports why), so what is
+      // left to do is state what held rather than keep a second copy of the rules that could drift.
       const caps = manifest.capabilities;
-      for (const tool of manifest.tools) {
-        for (const effect of tool.effects) {
-          const capability = EFFECT_CAPABILITY[effect];
-          if (capability !== undefined && !caps[capability]) {
-            return fail(`${tool.name} declares ${effect} but capabilities.${capability} is false`);
-          }
-          if (effect === "net.fetch" && caps.net.allowed_hosts.length === 0 && !caps.net.allow_localhost) {
-            return fail(`${tool.name} declares net.fetch but no host is allowed`);
-          }
-        }
-      }
-      for (const domain of manifest.ui?.app?.csp?.connectDomains ?? []) {
-        const host = hostOf(domain);
-        if (!hostAllowed(host, caps.net.allowed_hosts, caps.net.allow_localhost)) {
-          return fail(`ui.app.csp.connectDomains has ${domain}, which capabilities.net does not allow`);
-        }
-      }
+      const effects = new Set(manifest.tools.flatMap((tool) => tool.effects));
+      const domains = manifest.ui?.app?.csp?.connectDomains?.length ?? 0;
       const hosts = caps.net.allowed_hosts.length + (caps.net.allow_localhost ? 1 : 0);
-      return pass(`every declared effect is covered; ${hosts} allowed host(s)`);
+      return pass(
+        `${effects.size} declared effect(s) covered by capabilities, ` +
+          `${domains} connect domain(s) inside ${hosts} allowed host(s)`,
+      );
     },
   },
   {

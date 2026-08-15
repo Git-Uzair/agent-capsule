@@ -8,11 +8,13 @@ import { parseManifest } from "../format/manifest.ts";
 import { invokeTool, type InvokeOptions, type InvokeResult } from "../runtime/invoke.ts";
 import { replayRun, type ReplayOptions, type ReplayResult } from "../runtime/replay.ts";
 import {
+  CONFORMANCE_BUDGETS,
   CONFORMANCE_VECTORS,
   type ConformanceCtx,
   type ConformanceMeasurement,
   type ConformanceReport,
   type ConformanceResult,
+  type ConformanceStatus,
 } from "./checks.ts";
 
 export type ConformanceOptions = {
@@ -158,13 +160,25 @@ export async function runConformance(file: string, opts: ConformanceOptions = {}
   }
 }
 
-/** The three numbers a caller reads first: how many errors, how many warnings, and the verdict. */
-function summarise(report: Omit<ConformanceReport, "ok" | "errors" | "warnings">): ConformanceReport {
+/**
+ * The numbers a caller reads before the table: how many vectors ran and how they came out, how many
+ * errors and warnings that is, and the verdict. Only a failed `error` vector decides `ok`.
+ */
+function summarise(
+  report: Omit<ConformanceReport, "ok" | "total" | "passed" | "failed" | "skipped" | "errors" | "warnings" | "budgets">,
+): ConformanceReport {
+  const counted = (status: ConformanceStatus): number =>
+    report.results.filter((result) => result.status === status).length;
   const failed = report.results.filter((result) => result.status === "fail");
   const errors = failed.filter((result) => result.severity === "error").length;
   return {
     ...report,
     ok: errors === 0,
+    budgets: CONFORMANCE_BUDGETS,
+    total: report.results.length,
+    passed: counted("pass"),
+    failed: failed.length,
+    skipped: counted("skip"),
     errors,
     warnings: failed.length - errors,
   };

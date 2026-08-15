@@ -150,6 +150,93 @@ test("an unlisted container entry fails C02", async () => {
   });
 });
 
+test("an unsigned container fails C03 and exits 1", async () => {
+  await withHome(async (home) => {
+    const file = await packFixture(home);
+    // The same payload with the two signed documents left out: nobody signed this capsule. Whether a
+    // capsule is signed at all is C03's question, so it is a failure rather than a question the suite
+    // is entitled to leave unasked.
+    const reader = await openContainer(readFileSync(file));
+    const entries: CapsuleEntry[] = [];
+    for (const path of reader.list()) {
+      if (path.startsWith(".capsule/")) continue;
+      entries.push({ path, data: await reader.read(path) });
+    }
+    const unsigned = join(home, "unsigned.capsule");
+    writeFileSync(unsigned, await packEntries(entries));
+
+    const report = await runConformance(unsigned, { homeDir: home });
+
+    const c03 = vector(report, "C03");
+    assert.equal(c03.status, "fail");
+    assert.equal(c03.severity, "error");
+    assert.equal(c03.detail, "capsule is unsigned (missing statement or signature)");
+    assert.equal(report.ok, false);
+    assert.ok(report.errors >= 1, `expected an error, got ${report.errors}`);
+
+    const cli = runCli(["conformance", unsigned], home);
+    assert.equal(cli.status, 1);
+    assert.match(cli.stdout, /^C03\s+fail\s+error\s+/m);
+  });
+});
+
+test("a schema nested four property levels deep passes C05", async () => {
+  await withHome(async (home) => {
+    const file = await packFixture(home, (manifest) => {
+      const tool = manifest.tools[0];
+      assert.ok(tool !== undefined);
+      const properties = tool.inputSchema["properties"] as Record<string, unknown>;
+      // Four levels of property nesting: a schema an author would plausibly write. The bound is on
+      // subschema nesting, so the `properties` objects that hold the subschemas are not levels of it.
+      properties["a"] = {
+        type: "object",
+        properties: {
+          b: { type: "object", properties: { c: { type: "object", properties: { d: { type: "string" } } } } },
+        },
+      };
+    });
+
+    const report = await runConformance(file, { homeDir: home });
+
+    const c05 = vector(report, "C05");
+    assert.equal(c05.status, "pass", c05.detail);
+    // The tool schema itself plus a, b, c and d: five subschemas deep, well inside the bound of eight.
+    assert.match(c05.detail, /deepest 5\/8/);
+    assert.equal(report.errors, 0);
+    assert.equal(report.ok, true);
+  });
+});
+
+test("the report carries the vector counts and the budget ceilings", async () => {
+  await withHome(async (home) => {
+    const file = await packFixture(home);
+
+    const json = runCli(["conformance", file, "--json"], home);
+    assert.equal(json.status, 0);
+    const report = JSON.parse(json.stdout) as ConformanceReport;
+
+    assert.equal(report.total, IDS.length);
+    assert.equal(report.results.length, report.total);
+    assert.equal(report.passed + report.failed + report.skipped, report.total);
+    assert.equal(report.failed, 0);
+    assert.equal(report.errors, 0);
+    assert.equal(report.warnings, 0);
+    // Every ceiling the suite judges a measurement against, whether or not this run measured it.
+    assert.deepEqual(report.budgets, {
+      cold: 1500,
+      rssMiB: 128,
+      pack: 500,
+      verify: 200,
+      invoke: 500,
+      replay: 200,
+    });
+
+    const human = runCli(["conformance", file], home);
+    assert.equal(human.status, 0);
+    assert.match(human.stdout, /vectors: 12 total, \d+ passed, 0 failed, \d+ skipped/);
+  });
+});
+
 test("a poisoned description warns on C07 and errors with --strict", async () => {
   await withHome(async (home) => {
     const file = await packFixture(home, (manifest) => {
