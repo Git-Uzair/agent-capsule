@@ -13,8 +13,8 @@ import { openContainer, packEntries, type CapsuleEntry, type CapsuleReader } fro
 import { parseManifest, type Manifest } from "./manifest.ts";
 import { buildStatement, toolCatalogDigest, verifyStatement, type Statement } from "./statement.ts";
 
-const STATEMENT_PATH = ".capsule/statement.json";
-const SIGNATURE_PATH = ".capsule/signature.json";
+export const STATEMENT_PATH = ".capsule/statement.json";
+export const SIGNATURE_PATH = ".capsule/signature.json";
 
 /**
  * What may be packed from an author's directory: the manifest plus the three author-owned trees.
@@ -171,6 +171,25 @@ function asSignatureDoc(doc: Record<string, unknown>): SignatureDoc {
 }
 
 /**
+ * The two signed documents, read and shape-checked exactly as the loader reads them. Exported for the
+ * conformance suite, which has to judge the container, the digests, the signature and the manifest one
+ * property at a time — `loadCapsule` is all-or-nothing by design, so a capsule that fails one of them
+ * would otherwise be unexaminable rather than reported against the vector it failed.
+ */
+export async function readSignedDocs(
+  reader: CapsuleReader,
+  file: string,
+): Promise<{ statement: Statement; signature: SignatureDoc }> {
+  if (!reader.has(STATEMENT_PATH) || !reader.has(SIGNATURE_PATH)) {
+    throw new CapsuleError("E_SIGNATURE", "capsule is unsigned", { file });
+  }
+  return {
+    statement: asStatement(parseDoc((await reader.read(STATEMENT_PATH)).toString("utf8"), STATEMENT_PATH)),
+    signature: asSignatureDoc(parseDoc((await reader.read(SIGNATURE_PATH)).toString("utf8"), SIGNATURE_PATH)),
+  };
+}
+
+/**
  * The trust gate every entry point goes through. The order is the point: the signature is checked
  * before any digest, so we never hash a file list chosen by someone whose key we have not seen; the
  * digests are checked before the trust store, so a pin is never taken from a container whose bytes
@@ -184,11 +203,7 @@ export async function loadCapsule(
   const reader = await openContainer(bytes);
   const manifest = parseManifest((await reader.read("capsule.json")).toString("utf8"));
 
-  if (!reader.has(STATEMENT_PATH) || !reader.has(SIGNATURE_PATH)) {
-    throw new CapsuleError("E_SIGNATURE", "capsule is unsigned", { file });
-  }
-  const statement = asStatement(parseDoc((await reader.read(STATEMENT_PATH)).toString("utf8"), STATEMENT_PATH));
-  const signature = asSignatureDoc(parseDoc((await reader.read(SIGNATURE_PATH)).toString("utf8"), SIGNATURE_PATH));
+  const { statement, signature } = await readSignedDocs(reader, file);
 
   verifySignature(statement, signature);
   await verifyStatement(statement, reader);
