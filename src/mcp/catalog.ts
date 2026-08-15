@@ -1,13 +1,8 @@
 import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { EffectName, Manifest } from "../format/manifest.ts";
-import {
-  confusableSkeleton,
-  sanitizeModelText,
-  sanitizeValue,
-  scanTextTree,
-  stringLeaves,
-} from "../security/text.ts";
+import { confusableSkeleton, sanitizeModelText, sanitizeValue, scanTextTree, stringLeaves } from "../security/text.ts";
+import { uiResourceDescriptor } from "./apps.ts";
 import { BUILTIN_TOOLS } from "./builtin.ts";
 
 /**
@@ -183,11 +178,16 @@ export function buildToolList(
 
 /** Manifest order is kept: it is fixed by the signed statement, so it is already deterministic. */
 export function listResources(manifest: Manifest): CatalogResource[] {
-  return manifest.resources.map((resource) => ({
+  const resources: CatalogResource[] = manifest.resources.map((resource) => ({
     uri: resource.uri,
     name: sanitizeModelText(resource.name),
     mimeType: resource.mimeType,
   }));
+  const ui = uiResourceDescriptor(manifest);
+  if (ui !== undefined) {
+    resources.push(ui);
+  }
+  return resources;
 }
 
 /** `text` for text/* and JSON, base64 `blob` for everything else. */

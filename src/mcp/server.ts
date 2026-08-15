@@ -4,6 +4,7 @@ import type { LoadedCapsule } from "../format/capsule.ts";
 import type { Manifest } from "../format/manifest.ts";
 import type { GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
+import { readUiResource, UI_EXTENSION, UI_MIME_TYPE } from "./apps.ts";
 import { BUILTIN_TOOLS } from "./builtin.ts";
 import { handleToolsCall, type McpServerContext } from "./call.ts";
 import { assertNoToolNameCollision, buildToolList, isTextMimeType, listResources } from "./catalog.ts";
@@ -22,14 +23,12 @@ export const MCP_PROTOCOL_VERSION = "2026-07-28";
 /** The capsule specification the container itself conforms to. */
 export const CAPSULE_SPEC = "agentcapsule.org/0.1";
 
-const UI_MIME_TYPE = "text/html;profile=mcp-app";
 /** A catalog is cheap to rebuild and may be re-signed by its author, so one hour. */
 const CATALOG_TTL_MS = 3_600_000;
 /** Capsule content is immutable by construction — the statement digest covers it — so one day. */
 const CONTENT_TTL_MS = 86_400_000;
 
 const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
-const UI_EXTENSION = "io.modelcontextprotocol/ui";
 
 export type McpServerOptions = {
   capsule: LoadedCapsule;
@@ -126,6 +125,14 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     const uri = asRecord(params)?.["uri"];
     if (typeof uri !== "string") {
       throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "resources/read needs a string uri");
+    }
+    if (manifest.ui?.app !== undefined && uri === manifest.ui.app.resourceUri) {
+      const uiContent = await readUiResource(capsule);
+      return result({
+        contents: [uiContent],
+        ttlMs: CONTENT_TTL_MS,
+        cacheScope: "public",
+      });
     }
     // Only what the manifest declares is readable, so every byte returned is covered by the signed
     // statement digest. A container path that no resource points at is simply not a resource.

@@ -1922,9 +1922,11 @@ names in `src/mcp/mrtr.ts` carry a comment citing the spec URL and the date they
 
 ## Task 20 — Built-in `capsule_*` introspection tools (agent-to-agent surface)
 
-**Status:** In Progress (User override: unlimited verification cycles)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 20 implementation -> verifier FAIL (capsule_replay unknown run throwing -32603 instead of isError, unsanitized text in capsule_info, missing reserved tool name check for capsule_ prefix, openJournal creating sqlite file when none existed)
+- attempt 2: handleBuiltinCall try/catch mapping CapsuleError to isError complete result, sanitizeModelText on capsule_info fields, parseManifest assertNoReservedToolNames for capsule_ prefix, and existsSync check before openJournal in capsule_runs -> verifier FAIL (raw meta.author.name unsanitized in capsule_info, uncapped/unsanitized error message in builtin catch, capsule_info re-serving suppressed tools, assertNoToolNameCollision omitting BUILTIN_TOOLS)
+- attempt 3 (opus-coder): sanitize entire capsule_info payload via sanitizeValue, sanitize/cap error message in builtin catch with sanitizeModelText(err.message, 500), filter capsule_info tools to ctx.served, pass BUILTIN_TOOLS to assertNoToolNameCollision -> verifier PASS
 
 **Note on Built-in Introspection Tools:**
 Built-in tools (`capsule_info`, `capsule_runs`, and `capsule_replay`) are defined in `src/mcp/builtin.ts` and appended to `tools/list` via `buildToolList` in `src/mcp/catalog.ts`. In `src/mcp/call.ts`, built-in tool calls are validated against their JSON Schema via `schemaErrors`, dispatched through `handleBuiltinCall`, and returned in the MCP result envelope with `resultType: "complete"`, `structuredContent`, and serverInfo metadata in `_meta`.

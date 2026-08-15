@@ -571,6 +571,7 @@ test("resources/read returns capsule:// text and a blob, and rejects an unlisted
     assert.deepEqual(list["resources"], [
       { uri: "capsule://notes", name: "notes", mimeType: "text/plain" },
       { uri: "capsule://logo", name: "logo", mimeType: "image/png" },
+      { uri: "ui://hello", name: "App UI", mimeType: "text/html;profile=mcp-app" },
     ]);
     assert.equal(list["ttlMs"], 86_400_000);
     assert.equal(list["cacheScope"], "public");

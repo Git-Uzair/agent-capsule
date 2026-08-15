@@ -53,7 +53,7 @@ export function hostAllowed(host: string, allowedHosts: string[], allowLocalhost
 }
 
 /** Targets arrive as a URL from `net.fetch`, but a bare host is accepted too. */
-function hostOf(target: string): string {
+export function hostOf(target: string): string {
   if (!target.includes("://")) return target;
   try {
     return new URL(target).hostname;

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { SchemaObject } from "ajv/dist/2020.js";
 import { CapsuleError } from "../core/errors.ts";
 import { newValidator } from "../core/schema.ts";
+import { hostAllowed, hostOf } from "../runtime/policy.ts";
 
 export type EffectName =
   | "clock.now"
@@ -157,6 +158,18 @@ function assertSemantics(m: Manifest): void {
         `tool ${tool.name} references ${tool.ui} but ui.app.resourceUri is ${m.ui?.app?.resourceUri ?? "absent"}`,
         { tool: tool.name, ui: tool.ui },
       );
+    }
+  }
+
+  if (m.ui?.app?.csp?.connectDomains !== undefined) {
+    for (const domain of m.ui.app.csp.connectDomains) {
+      const host = hostOf(domain);
+      if (!hostAllowed(host, m.capabilities.net.allowed_hosts, m.capabilities.net.allow_localhost)) {
+        fail("ui.app.csp.connectDomains not covered by capabilities.net.allowed_hosts", {
+          domain,
+          host,
+        });
+      }
     }
   }
 
