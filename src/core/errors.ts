@@ -1,6 +1,6 @@
 export type CapsuleErrorCode =
   | "E_MANIFEST" | "E_CONTAINER" | "E_DIGEST" | "E_SIGNATURE" | "E_TRUST"
-  | "E_POLICY" | "E_GUEST" | "E_TIMEOUT" | "E_NONDETERMINISM" | "E_PROTOCOL" | "E_USAGE";
+  | "E_POLICY" | "E_GUEST" | "E_TIMEOUT" | "E_NONDETERMINISM" | "E_PROTOCOL" | "E_USAGE" | "E_CONTENT";
 
 export class CapsuleError extends Error {
   readonly code: CapsuleErrorCode;
