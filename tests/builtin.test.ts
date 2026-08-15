@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { CapsuleError } from "../src/core/errors.ts";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
+import { parseManifest } from "../src/format/manifest.ts";
 import { BUILTIN_TOOLS, handleBuiltinCall } from "../src/mcp/builtin.ts";
 import type { McpServerContext } from "../src/mcp/call.ts";
 import { createMcpServer, type McpServer } from "../src/mcp/server.ts";
@@ -350,5 +352,99 @@ test("handleBuiltinCall directly executes capsule_info, capsule_runs, and capsul
 
     const runs = (await handleBuiltinCall("capsule_runs", { limit: 5 }, ctx)) as unknown[];
     assert.deepEqual(runs, []);
+  });
+});
+
+test("capsule_replay for a non-existent runId returns isError: true with E_USAGE error", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const server = createMcpServer({ capsule });
+
+    const result = await callTool(server, {
+      name: "capsule_replay",
+      arguments: { runId: "00000000-0000-0000-0000-000000000000" },
+    });
+
+    assert.equal(result.resultType, "complete");
+    assert.equal(result.isError, true);
+    assert.equal(result.content?.length, 1);
+    assert.match(
+      result.content?.[0]?.text ?? "",
+      /^E_USAGE: no run 00000000-0000-0000-0000-000000000000 in the journal/,
+    );
+    assert.equal(result._meta?.["code"], "E_USAGE");
+    assert.deepEqual(result._meta?.["io.modelcontextprotocol/serverInfo"], {
+      name: "capsule/hello",
+      version: "1.0.0",
+    });
+  });
+});
+
+test("capsule_info sanitizes model-facing description text", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    capsule.manifest.meta.title = "Hello\u001b[31m World";
+    capsule.manifest.meta.description = "Line 1\n\n\n\nLine 2";
+    capsule.manifest.tools[0]!.title = "Greet\u0000 Tool";
+    capsule.manifest.tools[0]!.description = "A".repeat(1100);
+
+    const server = createMcpServer({ capsule });
+    const result = await callTool(server, { name: "capsule_info", arguments: {} });
+
+    assert.equal(result.resultType, "complete");
+    assert.equal(result.isError, false);
+    const info = result.structuredContent as {
+      meta: { title: string; description: string };
+      tools: { title: string; description: string }[];
+    };
+    assert.equal(info.meta.title, "Hello World");
+    assert.equal(info.meta.description, "Line 1\n\nLine 2");
+    assert.equal(info.tools[0]?.title, "Greet Tool");
+    assert.ok(info.tools[0]?.description.endsWith(" …[truncated]"));
+    assert.equal(info.tools[0]?.description.length, 1024);
+  });
+});
+
+test("Manifest with tool named capsule_test throws E_CONTENT: reserved tool name: capsule_test", () => {
+  const badManifest = {
+    spec_version: "0.1.0",
+    meta: { name: "hello", version: "1.0.0", title: "Hello", description: "A hello capsule." },
+    runtime: { type: "quickjs-1", entry: "src/main.js" },
+    tools: [
+      {
+        name: "capsule_test",
+        title: "Test",
+        description: "Test tool",
+        inputSchema: { type: "object" },
+      },
+    ],
+  };
+
+  assert.throws(
+    () => parseManifest(badManifest),
+    (e: unknown) => {
+      return (
+        e instanceof CapsuleError &&
+        e.code === "E_CONTENT" &&
+        e.message === "reserved tool name: capsule_test"
+      );
+    },
+  );
+});
+
+test("capsule_runs when journal does not exist returns [] without creating any .journal.sqlite file", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const server = createMcpServer({ capsule });
+    const journalPath = `${capsule.file}.journal.sqlite`;
+
+    assert.equal(existsSync(journalPath), false);
+
+    const result = await callTool(server, { name: "capsule_runs", arguments: {} });
+    assert.equal(result.resultType, "complete");
+    assert.equal(result.isError, false);
+    assert.deepEqual(result.structuredContent, []);
+
+    assert.equal(existsSync(journalPath), false);
   });
 });

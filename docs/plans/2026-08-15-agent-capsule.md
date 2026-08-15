@@ -1922,7 +1922,9 @@ names in `src/mcp/mrtr.ts` carry a comment citing the spec URL and the date they
 
 ## Task 20 — Built-in `capsule_*` introspection tools (agent-to-agent surface)
 
-**Status:** Completed (PASS)
+**Status:** In Progress (User override: unlimited verification cycles)
+**Attempt Ledger:**
+- attempt 1: initial Task 20 implementation -> verifier FAIL (capsule_replay unknown run throwing -32603 instead of isError, unsanitized text in capsule_info, missing reserved tool name check for capsule_ prefix, openJournal creating sqlite file when none existed)
 
 **Note on Built-in Introspection Tools:**
 Built-in tools (`capsule_info`, `capsule_runs`, and `capsule_replay`) are defined in `src/mcp/builtin.ts` and appended to `tools/list` via `buildToolList` in `src/mcp/catalog.ts`. In `src/mcp/call.ts`, built-in tool calls are validated against their JSON Schema via `schemaErrors`, dispatched through `handleBuiltinCall`, and returned in the MCP result envelope with `resultType: "complete"`, `structuredContent`, and serverInfo metadata in `_meta`.

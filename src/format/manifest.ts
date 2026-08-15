@@ -127,6 +127,9 @@ function assertNoTraversal(paths: string[]): void {
 function assertSemantics(m: Manifest): void {
   const seen = new Set<string>();
   for (const tool of m.tools) {
+    if (tool.name.startsWith("capsule_")) {
+      throw new CapsuleError("E_CONTENT", `reserved tool name: ${tool.name}`);
+    }
     if (seen.has(tool.name)) fail(`duplicate tool name: ${tool.name}`, { tool: tool.name });
     seen.add(tool.name);
 

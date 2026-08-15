@@ -114,7 +114,20 @@ export async function handleToolsCall(
     if (invalid !== undefined) {
       throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `invalid tool arguments: ${invalid}`);
     }
-    const res = await handleBuiltinCall(name, args, ctx);
+    let res: unknown;
+    try {
+      res = await handleBuiltinCall(name, args, ctx);
+    } catch (err) {
+      if (err instanceof CapsuleError) {
+        return {
+          resultType: "complete",
+          content: [textContent(`${err.code}: ${err.message}`)],
+          isError: true,
+          _meta: { code: err.code, ...ctx.resultMeta },
+        };
+      }
+      throw err;
+    }
     return {
       resultType: "complete",
       content: [textContent(JSON.stringify(res))],

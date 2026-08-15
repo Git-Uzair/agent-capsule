@@ -1,8 +1,10 @@
+import { existsSync } from "node:fs";
 import { CapsuleError } from "../core/errors.ts";
 import type { ManifestTool } from "../format/manifest.ts";
 import { openSidecar, sidecarPaths } from "../runtime/invoke.ts";
 import { openJournal } from "../runtime/journal.ts";
 import { replayRun } from "../runtime/replay.ts";
+import { sanitizeModelText } from "../security/text.ts";
 import type { McpServerContext } from "./call.ts";
 
 export const BUILTIN_TOOLS: ManifestTool[] = [
@@ -61,16 +63,21 @@ export async function handleBuiltinCall(
 ): Promise<unknown> {
   switch (tool) {
     case "capsule_info": {
+      const meta = ctx.capsule.manifest.meta;
       return {
         capsuleId: ctx.capsule.capsuleId,
         keyId: ctx.capsule.keyId,
         trust: ctx.capsule.trust,
-        meta: ctx.capsule.manifest.meta,
+        meta: {
+          ...meta,
+          title: sanitizeModelText(meta.title, 1024),
+          description: sanitizeModelText(meta.description, 1024),
+        },
         capabilities: ctx.capsule.manifest.capabilities,
         tools: ctx.capsule.manifest.tools.map((t) => ({
           name: t.name,
-          title: t.title,
-          description: t.description,
+          title: sanitizeModelText(t.title, 1024),
+          description: sanitizeModelText(t.description, 1024),
           effects: [...t.effects],
         })),
       };
@@ -78,7 +85,11 @@ export async function handleBuiltinCall(
     case "capsule_runs": {
       const limit = typeof args["limit"] === "number" ? args["limit"] : 10;
       const paths = sidecarPaths(ctx.capsule.file);
-      const journal = openSidecar("journal", () => openJournal(ctx.journalPath ?? paths.journal));
+      const journalPath = ctx.journalPath ?? paths.journal;
+      if (!existsSync(journalPath)) {
+        return [];
+      }
+      const journal = openSidecar("journal", () => openJournal(journalPath));
       try {
         return journal.recentRuns({ capsuleId: ctx.capsule.capsuleId, limit });
       } finally {
