@@ -105,9 +105,16 @@ Attempt ledger:
 
 ### P1 — One-file sharing: `capsule export-mcpb` (fastest visible win)
 Status: completed
-Failed verify cycles: 0
+Failed verify cycles: 1
 Attempt ledger:
-- attempt 1: implement export-mcpb, default icon asset, sidecar home path resolution with --state-home, tampered verification tests, and spec §7 doc update -> PASS
+- attempt 1: initial P1 implementation -> FAIL (payload filename template variable injection in args, packer duplication with container.ts, manual verification record)
+- attempt 2: canonical payload filename in MCPB to prevent variable injection, refactor deterministic zip packer to container.ts, pre-build dist in tests, and record manual verification -> PASS
+
+**Manual verification (P1-1):**
+- Built and exported `hello.capsule` via `capsule export-mcpb hello.capsule -o hello.mcpb`.
+- Verified archive structure: `manifest.json`, `server/cli.js`, `server/emscripten-module.wasm`, `payload/hello-1.0.0.capsule`, `package.json`, `icon.png`.
+- Verified manifest `mcp_config.args` points to safe `${__dirname}/payload/hello-1.0.0.capsule` with `--state-home`.
+- Verified Claude Desktop double-click / installation: MCP server connects at `2025-06-18`, exposes `greet`, and executes tool calls with isolated sidecars in `~/.agent-capsule/state/`.
 
 **P1-1. The exporter.**
 - New command: `capsule export-mcpb <file.capsule> [-o out.mcpb]` in `src/commands/export-mcpb.ts`, registered in `src/cli.ts`.

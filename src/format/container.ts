@@ -16,7 +16,7 @@ import { CapsuleError } from "../core/errors.ts";
  * Verified this session: with both settings the container hashes identically under TZ=UTC,
  * Asia/Kolkata, America/New_York and Pacific/Kiritimati; with either one alone it does not.
  */
-const EPOCH = new Date(1980, 0, 1);
+export const EPOCH = new Date(1980, 0, 1);
 
 const MAX_ENTRIES = 4096;
 const MAX_ENTRY = 32 * 1024 * 1024;
@@ -24,7 +24,8 @@ const MAX_TOTAL = 64 * 1024 * 1024;
 const MAX_PATH = 256;
 const LEGAL = /^(capsule\.json|(src|ui|data|\.capsule)\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)$/;
 
-export type CapsuleEntry = { path: string; data: Uint8Array };
+export type CapsuleEntry = { path: string; data: Uint8Array | Buffer };
+export type ZipEntry = { path: string; data: Uint8Array | Buffer; mode?: number; compress?: boolean };
 
 export type CapsuleReader = {
   list(): string[];
@@ -51,6 +52,31 @@ export function assertLegalPath(path: string): void {
   }
 }
 
+export async function packDeterministicZip(
+  entries: ZipEntry[],
+  options?: { compress?: boolean },
+): Promise<Buffer> {
+  const zip = new ZipFile();
+  const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const entry of sorted) {
+    const buf = Buffer.isBuffer(entry.data)
+      ? entry.data
+      : Buffer.from(entry.data.buffer, entry.data.byteOffset, entry.data.byteLength);
+    zip.addBuffer(buf, entry.path, {
+      mtime: EPOCH,
+      mode: entry.mode ?? 0o100644,
+      compress: entry.compress ?? options?.compress ?? false,
+      forceDosTimestamp: true,
+    });
+  }
+  zip.end();
+  const chunks: Buffer[] = [];
+  for await (const chunk of zip.outputStream as AsyncIterable<Buffer>) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 export async function packEntries(entries: CapsuleEntry[]): Promise<Buffer> {
   if (entries.length > MAX_ENTRIES) {
     fail(`too many entries: ${entries.length} > ${MAX_ENTRIES}`, { count: entries.length });
@@ -68,19 +94,7 @@ export async function packEntries(entries: CapsuleEntry[]): Promise<Buffer> {
   }
   if (total > MAX_TOTAL) fail(`payload too large: ${total} > ${MAX_TOTAL}`, { total });
 
-  const zip = new ZipFile();
-  for (const entry of [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
-    zip.addBuffer(Buffer.from(entry.data.buffer, entry.data.byteOffset, entry.data.byteLength), entry.path, {
-      mtime: EPOCH,
-      mode: 0o100644,
-      compress: false,
-      forceDosTimestamp: true,
-    });
-  }
-  zip.end();
-  const chunks: Buffer[] = [];
-  for await (const chunk of zip.outputStream as AsyncIterable<Buffer>) chunks.push(chunk);
-  return Buffer.concat(chunks);
+  return packDeterministicZip(entries, { compress: false });
 }
 
 /**

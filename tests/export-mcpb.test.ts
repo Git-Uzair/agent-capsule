@@ -9,8 +9,25 @@ import { exportMcpb, getDefaultIconPath, getDistRuntimePaths, packMcpb } from ".
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
 import { homeSidecarPaths } from "../src/runtime/invoke.ts";
 
+const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURE = resolve("templates", "hello");
 const CLI = resolve("dist", "cli.js");
+const DIST_CLI = resolve("dist", "cli.js");
+const DIST_WASM = resolve("dist", "emscripten-module.wasm");
+
+function ensureBuilt(): void {
+  if (!existsSync(DIST_CLI) || !existsSync(DIST_WASM)) {
+    const res = spawnSync(process.execPath, [join(ROOT, "scripts", "build.js")], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    if (res.status !== 0) {
+      throw new Error(`Build failed: ${res.stderr}`);
+    }
+  }
+}
+
+ensureBuilt();
 
 function extractZip(bytes: Buffer): Promise<Map<string, Buffer>> {
   return new Promise((resolve, reject) => {
@@ -80,7 +97,7 @@ describe("capsule export-mcpb", () => {
         "manifest.json",
         "server/cli.js",
         "server/emscripten-module.wasm",
-        "payload/hello.capsule",
+        "payload/hello-1.0.0.capsule",
         "package.json",
         "icon.png",
       ];
@@ -106,7 +123,7 @@ describe("capsule export-mcpb", () => {
       assert.deepEqual(manifest.server.mcp_config.args, [
         "${__dirname}/server/cli.js",
         "mcp",
-        "${__dirname}/payload/hello.capsule",
+        "${__dirname}/payload/hello-1.0.0.capsule",
         "--state-home",
       ]);
       assert.deepEqual(manifest.server.mcp_config.env, {});
@@ -128,7 +145,7 @@ describe("capsule export-mcpb", () => {
       assert.deepEqual(entries.get("server/emscripten-module.wasm"), readFileSync(distPaths.wasm));
 
       // Verify embedded capsule is byte-identical and passes loadCapsule verification
-      const embeddedCapsuleBytes = entries.get("payload/hello.capsule");
+      const embeddedCapsuleBytes = entries.get("payload/hello-1.0.0.capsule");
       assert.deepEqual(embeddedCapsuleBytes, capsule.bytes);
 
       const embeddedTemp = join(home, "extracted-verify.capsule");
@@ -137,6 +154,40 @@ describe("capsule export-mcpb", () => {
       assert.equal(loadedEmbedded.capsuleId, capsule.capsuleId);
       assert.equal(loadedEmbedded.manifest.meta.name, "hello");
     });
+  });
+
+  it("payload filename with template variables on disk is canonicalized to safe manifest-derived name preventing injection", async () => {
+    await withHome(async (home) => {
+      const capsule = await packTestCapsule(home);
+      // Copy capsule to a file containing template variables in name
+      const dangerousPath = join(home, "${HOME}-test.capsule");
+      cpSync(capsule.file, dangerousPath);
+
+      const mcpbPath = join(home, "dangerous.mcpb");
+      await exportMcpb(dangerousPath, mcpbPath);
+
+      const entries = await extractZip(readFileSync(mcpbPath));
+      assert.equal(entries.has("payload/hello-1.0.0.capsule"), true);
+      assert.equal(entries.has("payload/${HOME}-test.capsule"), false);
+
+      const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+      assert.deepEqual(manifest.server.mcp_config.args, [
+        "${__dirname}/server/cli.js",
+        "mcp",
+        "${__dirname}/payload/hello-1.0.0.capsule",
+        "--state-home",
+      ]);
+    });
+  });
+
+  it("packMcpb produces deterministic archive using shared deterministic zip packer", async () => {
+    const entries = [
+      { path: "b.txt", data: Buffer.from("world", "utf8") },
+      { path: "a.txt", data: Buffer.from("hello", "utf8") },
+    ];
+    const zip1 = await packMcpb(entries);
+    const zip2 = await packMcpb([...entries].reverse());
+    assert.deepEqual(zip1, zip2, "packMcpb output must be order-independent and deterministic");
   });
 
   it("extracts and runs MCP server responding to 2025-06-18 handshake and tool calls with --state-home", async () => {
@@ -156,7 +207,7 @@ describe("capsule export-mcpb", () => {
         writeFileSync(dest, data);
       }
 
-      // Run extracted node server/cli.js mcp payload/hello.capsule --state-home
+      // Run extracted node server/cli.js mcp payload/hello-1.0.0.capsule --state-home
       const input = [
         JSON.stringify({
           jsonrpc: "2.0",
@@ -180,7 +231,7 @@ describe("capsule export-mcpb", () => {
 
       const stdout = execFileSync(
         process.execPath,
-        ["server/cli.js", "mcp", "payload/hello.capsule", "--state-home"],
+        ["server/cli.js", "mcp", "payload/hello-1.0.0.capsule", "--state-home"],
         {
           cwd: sandbox,
           input: `${input}\n`,
@@ -225,8 +276,8 @@ describe("capsule export-mcpb", () => {
       assert.equal(existsSync(sidecars.journal), true, `Journal db should exist at ${sidecars.journal}`);
 
       // Ensure NO sidecars were written inside sandbox/payload/
-      assert.equal(existsSync(join(sandbox, "payload", "hello.capsule.app.sqlite")), false);
-      assert.equal(existsSync(join(sandbox, "payload", "hello.capsule.journal.sqlite")), false);
+      assert.equal(existsSync(join(sandbox, "payload", "hello-1.0.0.capsule.app.sqlite")), false);
+      assert.equal(existsSync(join(sandbox, "payload", "hello-1.0.0.capsule.journal.sqlite")), false);
     });
   });
 
@@ -247,7 +298,7 @@ describe("capsule export-mcpb", () => {
       }
 
       // Tamper guest source in payload capsule
-      const payloadPath = join(sandbox, "payload", "hello.capsule");
+      const payloadPath = join(sandbox, "payload", "hello-1.0.0.capsule");
       const payloadBytes = readFileSync(payloadPath);
       const at = payloadBytes.indexOf("greet_count");
       assert.ok(at > 0, "payload must contain greet_count");
@@ -256,7 +307,7 @@ describe("capsule export-mcpb", () => {
 
       const res = spawnSync(
         process.execPath,
-        ["server/cli.js", "mcp", "payload/hello.capsule", "--state-home"],
+        ["server/cli.js", "mcp", "payload/hello-1.0.0.capsule", "--state-home"],
         {
           cwd: sandbox,
           input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }) + "\n",

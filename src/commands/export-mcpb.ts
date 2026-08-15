@@ -1,18 +1,17 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
-import { ZipFile } from "yazl";
+import { dirname, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule } from "../format/capsule.ts";
+import { packDeterministicZip, type ZipEntry } from "../format/container.ts";
 import { sanitizeModelText } from "../security/text.ts";
 
 const USAGE = "usage: capsule export-mcpb <file> [-o <out.mcpb>]";
-const EPOCH = new Date(1980, 0, 1);
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
 }
 
-export type McpbEntry = { path: string; data: Uint8Array | Buffer };
+export type McpbEntry = ZipEntry;
 
 export function getDistRuntimePaths(customDistDir?: string): { cliJs: string; wasm: string } {
   if (customDistDir) {
@@ -69,25 +68,7 @@ export function getDefaultIconPath(customIconPath?: string): string {
 }
 
 export async function packMcpb(entries: McpbEntry[]): Promise<Buffer> {
-  const zip = new ZipFile();
-  const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  for (const entry of sorted) {
-    const buf = Buffer.isBuffer(entry.data)
-      ? entry.data
-      : Buffer.from(entry.data.buffer, entry.data.byteOffset, entry.data.byteLength);
-    zip.addBuffer(buf, entry.path, {
-      mtime: EPOCH,
-      mode: 0o100644,
-      compress: true,
-      forceDosTimestamp: true,
-    });
-  }
-  zip.end();
-  const chunks: Buffer[] = [];
-  for await (const chunk of zip.outputStream as AsyncIterable<Buffer>) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
+  return packDeterministicZip(entries, { compress: true });
 }
 
 export async function exportMcpb(
@@ -106,10 +87,7 @@ export async function exportMcpb(
   const loaded = await loadCapsule(capsulePath, { trust: false });
   const manifest = loaded.manifest;
 
-  const baseName = basename(capsulePath);
-  const capsuleFileName = baseName.endsWith(".capsule")
-    ? baseName
-    : `${manifest.meta.name}-${manifest.meta.version}.capsule`;
+  const payloadFileName = `${manifest.meta.name}-${manifest.meta.version}.capsule`;
 
   const runtimePaths = getDistRuntimePaths(opts?.distDir);
   const iconPath = getDefaultIconPath(opts?.iconPath);
@@ -136,7 +114,7 @@ export async function exportMcpb(
         args: [
           "${__dirname}/server/cli.js",
           "mcp",
-          `\${__dirname}/payload/${capsuleFileName}`,
+          `\${__dirname}/payload/${payloadFileName}`,
           "--state-home",
         ],
         env: {},
@@ -165,7 +143,7 @@ export async function exportMcpb(
       data: wasmData,
     },
     {
-      path: `payload/${capsuleFileName}`,
+      path: `payload/${payloadFileName}`,
       data: capsuleData,
     },
     {
