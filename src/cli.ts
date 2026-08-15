@@ -2,6 +2,7 @@
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { packCommand } from "./commands/pack.ts";
+import { replayCommand } from "./commands/replay.ts";
 import { runCommand } from "./commands/run.ts";
 import { verifyCommand } from "./commands/verify.ts";
 
@@ -11,6 +12,7 @@ const COMMANDS = new Map<string, Command>([
   ["pack", packCommand],
   ["verify", verifyCommand],
   ["run", runCommand],
+  ["replay", replayCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]

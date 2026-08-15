@@ -74,9 +74,10 @@ function schemaErrors(schema: Record<string, unknown>, value: unknown): string |
  * Every failure the caller is shown. A `CapsuleError` already carries the vocabulary and a message
  * fit to repeat; anything else came out of guest-driven work — a guest that nested its value deeper
  * than the host can walk, a port that threw — so it is reported as the guest's failure with a
- * cleaned message rather than a host stack trace.
+ * cleaned message rather than a host stack trace. Exported because the replay engine reports the
+ * same class of failure and must report it identically.
  */
-function errorOf(e: unknown): InvokeError {
+export function errorOf(e: unknown): InvokeError {
   if (e instanceof CapsuleError) return { code: e.code, message: e.message };
   const message = e instanceof Error ? e.message : String(e);
   return { code: "E_GUEST", message: sanitizeModelText(message, MAX_MESSAGE_CHARS) || "the tool failed" };
@@ -87,8 +88,11 @@ function errorOf(e: unknown): InvokeError {
  * of it is treated as hostile text: escape sequences, zero-width characters and bidi overrides are
  * removed and the length is capped. Property names are left as they are — sanitising them could
  * collapse two distinct keys into one and silently drop a field.
+ *
+ * Exported because the digest a run records is the digest of the *cleaned* value: a replay that
+ * hashed the raw one would call every capsule with hostile text in its output a divergence.
  */
-function sanitizeValue(value: unknown): unknown {
+export function sanitizeValue(value: unknown): unknown {
   if (typeof value === "string") return sanitizeModelText(value, MAX_VALUE_CHARS);
   if (Array.isArray(value)) return value.map(sanitizeValue);
   if (typeof value === "object" && value !== null) {
@@ -102,8 +106,9 @@ function sanitizeValue(value: unknown): unknown {
  * — and a path is not a promise that the file behind it is a database: a text file, a half-written
  * download or somebody else's SQLite file all fail on open. That is the caller's input being wrong,
  * so it is `E_USAGE` in this vocabulary rather than SQLite's error reaching the user as a stack trace.
+ * Replay takes the same paths from the same flags, so it opens them the same way.
  */
-function openSidecar<T>(which: "journal" | "state", open: () => T): T {
+export function openSidecar<T>(which: "journal" | "state", open: () => T): T {
   try {
     return open();
   } catch (e) {
