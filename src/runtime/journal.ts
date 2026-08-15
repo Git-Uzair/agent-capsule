@@ -37,6 +37,13 @@ export type RecordedEffect = {
   ms?: number;
 };
 
+export type RunSummary = {
+  runId: string;
+  tool: string;
+  status: "running" | "ok" | "error";
+  startedAt: string;
+};
+
 export type Journal = {
   beginRun(opts: {
     runId: string;
@@ -51,6 +58,7 @@ export type Journal = {
   effects(runId: string): RecordedEffect[];
   verifyChain(runId: string): void;
   latestRunId(capsuleId?: string): string | null;
+  recentRuns(opts?: { capsuleId?: string; limit?: number }): RunSummary[];
   close(): void;
 };
 
@@ -111,7 +119,7 @@ export function openJournal(path: string): Journal {
   // schema or one of the statements compiled against it, and by then the handle is open. Everything
   // that can fail while it is open sits inside this one `try`, so the handle is closed rather than left
   // holding a lock on a file the caller is about to be told is unusable.
-  const { insertRun, updateStatus, selectLast, insertEvent, selectEvents, selectLatest } = (() => {
+  const { insertRun, updateStatus, selectLast, insertEvent, selectEvents, selectLatest, selectRuns } = (() => {
     try {
       db.exec(SCHEMA);
       return {
@@ -132,6 +140,11 @@ export function openJournal(path: string): Journal {
         selectLatest: db.prepare(
           "SELECT run_id FROM capsule_runs WHERE (:capsuleId IS NULL OR capsule_id = :capsuleId) " +
             "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        ),
+        selectRuns: db.prepare(
+          "SELECT run_id, tool, status, started_at FROM capsule_runs " +
+            "WHERE (:capsuleId IS NULL OR capsule_id = :capsuleId) " +
+            "ORDER BY started_at DESC, rowid DESC LIMIT :limit",
         ),
       };
     } catch (e) {
@@ -198,6 +211,21 @@ export function openJournal(path: string): Journal {
     latestRunId(capsuleId) {
       const row = selectLatest.get({ capsuleId: capsuleId ?? null }) as { run_id: string } | undefined;
       return row === undefined ? null : row.run_id;
+    },
+
+    recentRuns({ capsuleId, limit = 10 }: { capsuleId?: string; limit?: number } = {}) {
+      const rows = selectRuns.all({ capsuleId: capsuleId ?? null, limit }) as {
+        run_id: string;
+        tool: string;
+        status: "running" | "ok" | "error";
+        started_at: string;
+      }[];
+      return rows.map((r) => ({
+        runId: r.run_id,
+        tool: r.tool,
+        status: r.status,
+        startedAt: r.started_at,
+      }));
     },
 
     close() {

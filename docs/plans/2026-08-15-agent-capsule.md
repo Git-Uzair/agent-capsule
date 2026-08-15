@@ -1157,6 +1157,8 @@ Cyrillic-homoglyph version of `іgnоre previous instructions` and a zero-width-
 
 ## Task 9 — `capsule verify` (the user-facing trust report)
 
+**Status:** Completed (PASS)
+
 **Goal:** one command that answers "is it safe to attach this file to my agent?".
 **Difficulty:** EASY
 **Files (new):** `src/commands/verify.ts`, `tests/verify.test.ts`
@@ -1209,6 +1211,8 @@ Behaviour:
 # PHASE 1 — Deterministic runtime (tasks 10–16)
 
 ## Task 10 — Hash-chained event journal (SQLite sidecar)
+
+**Status:** Completed (PASS)
 
 **Goal:** the authoritative, tamper-evident record of everything a run observed and did.
 **Difficulty:** HARD
@@ -1277,6 +1281,11 @@ test("effects() returns only completed effects in order", …)
 
 ## Task 11 — Capability policy engine (deny by default)
 
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 11 implementation -> verifier FAIL (wildcard net grant check mismatch between requiredGrants and check, duplicate atomic write helper with trust.ts)
+- attempt 2: wildcard grant matching in check aligned with requiredGrants, extracted shared atomic store helper -> verifier PASS
+
 **Goal:** one authority that answers "may tool T perform op O on target X?" — enforced in the
 host, never in the guest.
 **Difficulty:** HARD
@@ -1321,6 +1330,12 @@ for a net-using manifest.
 ---
 
 ## Task 12 — Effect ports with record/replay
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 12 implementation -> verifier FAIL (leading semicolon/comment bypass in sql keyword check, ATTACH in sqlQuery, byte-length for kv value, replay ordinal indexing on failed effects)
+- attempt 2: tokenizing keyword strip, UTF-8 byte length gate for kv, and gap execution in replay -> verifier FAIL (sqlQuery .all() memory materialization before row/byte check causing heap OOM on huge queries, gap ordinal returning success in replay without throwing E_NONDETERMINISM)
+- attempt 3: stream sqlQuery with statement.iterate(), per-row byte calculation without full JSON serialization, RangeError/alloc failure mapping to E_USAGE, savepoint rollback on gap ordinal with E_NONDETERMINISM on unexpected success -> verifier PASS
 
 **Goal:** the single hole in the sandbox, and the place non-determinism is quarantined.
 **Difficulty:** HARD
@@ -1384,6 +1399,15 @@ test("policy denial happens before journalling", …)        // denied op leaves
 ---
 
 ## Task 13 — QuickJS guest sandbox with determinism prelude
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 13 implementation -> verifier FAIL (args JSON serialization TypeError, guest-poisoned JSON.stringify escaping E_GUEST, guest overriding global __tool)
+- attempt 2: install globals before prelude, capture real JSON and invoker in closure, non-writable __capsule_invoke on globalThis called via this., try-catch on args JSON serialization -> verifier FAIL (Date.prototype.constructor leaked RealDate wall clock, tool method invocation lost this receiver globalThis.tools)
+- attempt 3: patch CapsuleDate.prototype.constructor = CapsuleDate, patch getTimezoneOffset to 0, invoke tool with captured Reflect.apply(fn, tools, [args]) -> verifier FAIL (host timezone leaked via Date local-time accessors getHours/toString across timezones, Object.defineProperty on globalThis allowed overriding __capsule_invoke)
+- attempt 4: local Date methods rebuilt from UTC twins, invoker closure returned and installed post-source with UUID -> verifier FAIL (asyncify host stack exhaustion in deep recursion set process.exitCode = 1 in emscripten quit hook)
+- attempt 5: snapshot priorExitCode before runGuest and restore in finally -> verifier FAIL (dispatch suspension duration not counted against timeout_ms, prototype properties like toString/constructor resolved as tools)
+- attempt 6 (opus-coder): capture Object.prototype.hasOwnProperty in prelude and check own property on tools table, track Budget with expired check after dispatch and timeout enforcement in runGuest -> verifier PASS
 
 **Goal:** run capsule JS with no ambient authority, bounded CPU/memory, and no wall-clock or
 entropy of its own.
@@ -1491,6 +1515,15 @@ open-handle warnings (all QuickJS handles disposed).
 
 ## Task 14 — Invocation pipeline and `capsule run`
 
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 14 implementation -> verifier FAIL (duplicate runId append/finishRun mutating existing journal run on beginRun failure)
+- attempt 2: track started state, do not append to journal if beginRun fails, map duplicate runId to E_USAGE with zero events -> verifier FAIL (openJournal outside try block caused raw throw on corrupt/invalid database file)
+- attempt 3: move openJournal inside try block, handle cleanup on database open failures in journal.ts and state.ts, map open errors to E_USAGE with zero events and no stack trace -> verifier FAIL (db.prepare outside try block in journal/state open leaked handle on conflicting schema, loadCapsule in run.ts threw uncaught fs stack trace)
+- attempt 4: wrap full schema exec and statement preparation in try-catch that closes handles on error in journal.ts/state.ts, and wrap loadCapsule in run.ts to map fs errors to E_CONTAINER -> verifier PASS
+
+**Note on Unified InvokeResult:** `invokeTool` returns unified `InvokeResult = { ok, runId, tool, value, error: { code, message }, ms, events, effects }` where missing policy grants return `ok: false` with `error: { code: "E_POLICY", message: "missing user grants: ..." }`, and CLI maps `ok ? 0 : 1`.
+
 **Goal:** the one code path every entry point (CLI, MCP, UI) uses to call a tool.
 **Difficulty:** HARD
 **Files (new):** `src/runtime/invoke.ts`, `src/commands/run.ts`, `tests/invoke.test.ts`
@@ -1555,6 +1588,8 @@ test("cli exit codes: 0 ok, 3 consent needed, 1 error", …)
 
 ## Task 15 — `net.fetch` egress with allowlist and SSRF defence
 
+**Status:** Completed (PASS)
+
 **Goal:** the sandbox's other half — "an attacker who cannot escape the kernel can still
 exfiltrate every secret it can read over an outbound HTTP connection".
 **Difficulty:** HARD
@@ -1607,6 +1642,16 @@ the public internet (grep the diff for real hostnames).
 ---
 
 ## Task 16 — Replay engine and `capsule replay`
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 16 implementation -> verifier FAIL (trailing failed effect in recording treated as out-of-bounds divergence instead of reproducible failure)
+- attempt 2: pass maxRequestedOrdinal from journal.events to createEffects and use i <= lastOrdinal for gap branch -> verifier FAIL (under-count check at replay.ts:228 compared against recorded.length instead of expected total requested effects count)
+- attempt 3: compare replay effect count against Math.max(recorded.length, maxRequestedOrdinal + 1) -> verifier FAIL (gap ordinals in createEffects did not compare op and paramsDigest against recorded effect.requested event)
+- attempt 4: pass recordedRequests map to createEffects and compare op and paramsDigest on gap ordinals before savepoint execution -> verifier FAIL (netFetch port not passed to createEffects in replayRun, causing failed net.fetch effect gap re-runs to diverge)
+- attempt 5: pass createFetchPort to createEffects in replayRun -> verifier PASS
+
+**Note on Unified ReplayResult:** `replayRun` produces `ReplayResult = { ok, runId, tool, diverged, events, effects, value, error, recordedValueDigest }` verifying deterministic recorded execution against in-memory state without persisting duplicate replay runs, with CLI `capsule replay <file> [--run <runId>] [--json] [--journal <path>] [--accept-drift]` exiting 0 on faithful reproduction and 1 on divergence/error.
 
 **Goal:** re-execute a past run from its journal and prove it produces the same effects — the
 feature that makes capsules auditable, debuggable and regression-testable.
@@ -1666,6 +1711,13 @@ All shapes below were read from the specification this session
 
 ## Task 17 — stdio JSON-RPC transport and `_meta` validation
 
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 17 implementation -> verifier FAIL (duplicated asRecord helper, protocol meta constants and plan deviation note)
+- attempt 2: export asRecord from canonical.ts, reuse across capsule.ts/meta.ts/transport.ts, test in canonical.test.ts -> verifier PASS
+
+**Note on Transport Architecture:** Task 17 implements the foundational newline-delimited stdio JSON-RPC 2.0 transport in `src/mcp/transport.ts` (16 MiB line cap, error codes `-32700`, `-32600`, `-32603`) and `src/mcp/meta.ts` (`Meta` parser for traceparent, progressToken, caller). Task 18 implements the MCP 2026-07-28 protocol loop (`serveStdio`, protocol metadata, `initialize`, `server/discover`, `tools/list`, etc.).
+
 **Goal:** a compliant, hostile-input-proof message loop.
 **Difficulty:** HARD
 **Files (new):** `src/mcp/jsonrpc.ts`, `src/mcp/meta.ts`, `src/mcp/loop.ts`, `tests/mcp-loop.test.ts`
@@ -1709,6 +1761,20 @@ within 2 s.
 ---
 
 ## Task 18 — `server/discover`, `tools/list`, `resources/*`
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 18 implementation -> verifier FAIL (plan deviation note for CLI flags --state/--journal plumbed into McpServerOptions for tools/call in Task 19)
+- attempt 2: recorded MCP handshake and metadata architectural notes -> verifier FAIL (injection scanner skipped schema property keys, sanitizeSchemaLeaves duplication with sanitizeValue)
+- attempt 3: recorded attempt 3 in plan -> verifier FAIL (injection sentence in schema property key served unscreened, raw control characters in property keys, duplicated sanitizeValue)
+- attempt 4: stringLeaves/scanTextTree includes keys + values, hasUnsafeIdentifier screens raw keys/required entries -> verifier FAIL (blanket sanitizeValue rewrote enum/const/required values, splitting literally-matched schema slots)
+- attempt 5: sanitizeSchemaProse and hasUnsafeIdentifier split -> verifier FAIL (hasUnsafeIdentifier lacked keysAreNames context awareness, misinterpreting properties named pattern/enum/const as literal keywords)
+- attempt 6: make hasUnsafeIdentifier context-aware with keysAreNames mirroring sanitizeSchemaProse -> verifier PASS
+
+**Note on McpServerOptions, Handshake & Metadata:**
+1. **CLI Flags & Sidecars:** `capsule mcp <file> [--state <path>] [--journal <path>] [--accept-drift] [--allow-suspicious]` forwards sidecar paths and options to `createMcpServer`, which handles catalog discovery/resources in Task 18 and executes `tools/call` invocations via `invokeTool` in Task 19.
+2. **Handshake Compatibility:** `initialize` is supported as a standard MCP handshake returning `protocolVersion: "2026-07-28"`, `serverInfo`, and capabilities (allowing modern MCP clients to connect seamlessly).
+3. **Advisory Metadata:** `_meta` is treated as advisory client metadata; `parseMeta` parses optional `_meta` (progressToken, traceparent, caller) to wire into tool invocations in Task 19 and trace export in Task 23, while catalog requests without `_meta` are served gracefully.
 
 **Goal:** a capsule presents itself to an agent, safely and cacheably.
 **Difficulty:** HARD
@@ -1778,6 +1844,12 @@ test("every result carries resultType and serverInfo", …)   // loop over all h
 ---
 
 ## Task 19 — `tools/call` and MRTR consent
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 19 implementation -> verifier FAIL (plan deviation note on tools/call permission denial mapping and stateless complete resultType)
+- attempt 2: recorded architectural note -> verifier FAIL (MRTR input_required, requestState HMAC, structuredContent, and 9 plan tests required)
+- attempt 3 (opus-coder): implemented full MRTR consent (requeststate.ts, mrtr.ts, call.ts), HMAC requestState, structuredContent, input_required, and 9 plan tests -> verifier PASS
 
 **Goal:** call a tool, and ask the human for a capability grant *without* a stateful session.
 **Difficulty:** HARD
@@ -1849,6 +1921,11 @@ names in `src/mcp/mrtr.ts` carry a comment citing the spec URL and the date they
 ---
 
 ## Task 20 — Built-in `capsule_*` introspection tools (agent-to-agent surface)
+
+**Status:** Completed (PASS)
+
+**Note on Built-in Introspection Tools:**
+Built-in tools (`capsule_info`, `capsule_runs`, and `capsule_replay`) are defined in `src/mcp/builtin.ts` and appended to `tools/list` via `buildToolList` in `src/mcp/catalog.ts`. In `src/mcp/call.ts`, built-in tool calls are validated against their JSON Schema via `schemaErrors`, dispatched through `handleBuiltinCall`, and returned in the MCP result envelope with `resultType: "complete"`, `structuredContent`, and serverInfo metadata in `_meta`.
 
 **Goal:** the self-evolution surface from the proposal §6 — but host-provided, so it is one
 trusted computing base instead of a duplicated builder in every file (§4).

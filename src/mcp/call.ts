@@ -6,6 +6,7 @@ import { invokeTool, schemaErrors } from "../runtime/invoke.ts";
 import { buildPolicy } from "../runtime/policy.ts";
 import { addGrant, loadGrants, saveGrants, type GrantsStore } from "../security/grants.ts";
 import { sanitizeModelText } from "../security/text.ts";
+import { BUILTIN_TOOLS, handleBuiltinCall } from "./builtin.ts";
 import { parseMeta, type Meta } from "./meta.ts";
 import { buildInputRequired, DECISION, readInputResponses } from "./mrtr.ts";
 import { loadStateKey, signRequestState, verifyRequestState, type RequestStatePayload } from "./requeststate.ts";
@@ -101,6 +102,26 @@ export async function handleToolsCall(
   const args = rawArgs === undefined ? {} : asRecord(rawArgs);
   if (args === undefined) {
     throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call arguments must be an object");
+  }
+
+  const builtinTool = BUILTIN_TOOLS.find((candidate) => candidate.name === name);
+  if (builtinTool !== undefined) {
+    if (!ctx.served.has(name)) {
+      const clean = sanitizeModelText(name, 120);
+      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `tool is not served: ${clean}`);
+    }
+    const invalid = schemaErrors(builtinTool.inputSchema, args);
+    if (invalid !== undefined) {
+      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `invalid tool arguments: ${invalid}`);
+    }
+    const res = await handleBuiltinCall(name, args, ctx);
+    return {
+      resultType: "complete",
+      content: [textContent(JSON.stringify(res))],
+      structuredContent: res,
+      isError: false,
+      _meta: { ...ctx.resultMeta },
+    };
   }
 
   const tool = ctx.capsule.manifest.tools.find((candidate) => candidate.name === name);

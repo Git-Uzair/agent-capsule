@@ -8,6 +8,7 @@ import {
   scanTextTree,
   stringLeaves,
 } from "../security/text.ts";
+import { BUILTIN_TOOLS } from "./builtin.ts";
 
 /**
  * A tool as an agent sees it: every piece of prose already sanitised, the declared effects attached
@@ -168,7 +169,16 @@ export function buildToolList(
     });
   }
 
-  return tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const sortedManifestTools = tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const builtinCatalogTools: CatalogTool[] = BUILTIN_TOOLS.map((tool) => ({
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    effects: [...tool.effects],
+  }));
+
+  return [...sortedManifestTools, ...builtinCatalogTools];
 }
 
 /** Manifest order is kept: it is fixed by the signed statement, so it is already deterministic. */

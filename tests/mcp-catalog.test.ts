@@ -229,7 +229,7 @@ test("tools/list is sorted, cacheable and carries ui metadata", async () => {
 
     assert.deepEqual(
       tools.map((t) => t.name),
-      ["alpha", "greet", "zulu"],
+      ["alpha", "greet", "zulu", "capsule_info", "capsule_runs", "capsule_replay"],
     );
     assert.equal(result["ttlMs"], 3_600_000);
     assert.equal(result["cacheScope"], "public");
@@ -286,7 +286,7 @@ test("tools/list omits a poisoned tool unless allowed", async () => {
     const suppressed = toolsOf(await callOk(createMcpServer({ capsule, warn: (l) => warnings.push(l) }), "tools/list"));
     assert.deepEqual(
       suppressed.map((t) => t.name),
-      ["alpha"],
+      ["alpha", "capsule_info", "capsule_runs", "capsule_replay"],
     );
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] as string, /^suppressed tool greet: markers=.*ignore_previous/);
@@ -300,7 +300,7 @@ test("tools/list omits a poisoned tool unless allowed", async () => {
     );
     assert.deepEqual(
       allowed.map((t) => t.name),
-      ["alpha", "greet"],
+      ["alpha", "greet", "capsule_info", "capsule_runs", "capsule_replay"],
     );
     assert.deepEqual(allowedWarnings, []);
   });
@@ -323,7 +323,7 @@ test("tools/list omits a tool whose schema property key carries an injection sen
     const suppressed = toolsOf(await callOk(createMcpServer({ capsule, warn: (l) => warnings.push(l) }), "tools/list"));
     assert.deepEqual(
       suppressed.map((t) => t.name),
-      ["alpha"],
+      ["alpha", "capsule_info", "capsule_runs", "capsule_replay"],
     );
     assert.equal(warnings.length, 1);
     assert.match(warnings[0] as string, /^suppressed tool greet: markers=.*ignore_previous/);
@@ -331,7 +331,7 @@ test("tools/list omits a tool whose schema property key carries an injection sen
     const allowed = toolsOf(await callOk(createMcpServer({ capsule, allowSuspicious: true }), "tools/list"));
     assert.deepEqual(
       allowed.map((t) => t.name),
-      ["alpha", "greet"],
+      ["alpha", "greet", "capsule_info", "capsule_runs", "capsule_replay"],
     );
   });
 });
@@ -373,7 +373,7 @@ test("tools/list omits a tool whose schema identifiers carry hidden characters u
       );
       assert.deepEqual(
         suppressed.map((t) => t.name),
-        ["alpha"],
+        ["alpha", "capsule_info", "capsule_runs", "capsule_replay"],
         label,
       );
       assert.deepEqual(warnings, ["suppressed tool greet: markers=unsafe_schema_identifier"], label);
@@ -381,7 +381,7 @@ test("tools/list omits a tool whose schema identifiers carry hidden characters u
       const allowed = toolsOf(await callOk(createMcpServer({ capsule, allowSuspicious: true }), "tools/list"));
       assert.deepEqual(
         allowed.map((t) => t.name),
-        ["alpha", "greet"],
+        ["alpha", "greet", "capsule_info", "capsule_runs", "capsule_replay"],
         label,
       );
     });
@@ -513,7 +513,7 @@ test("tools/list serves a tool whose property is named after a literally matched
 
       assert.deepEqual(
         tools.map((t) => t.name),
-        ["greet"],
+        ["greet", "capsule_info", "capsule_runs", "capsule_replay"],
         label,
       );
       assert.deepEqual(warnings, [], label);
