@@ -231,10 +231,10 @@ The manifest file `capsule.json` MUST be located at the root of the archive and 
 
 ### 2.1 Manifest Validation & Semantic Invariants
 
-A conforming runtime MUST enforce the following semantic invariants when parsing `capsule.json`:
+A conforming runtime MUST enforce the following semantic invariants for `capsule.json`. Invariants 1 and 3–6 are enforced while parsing the manifest; invariant 2 is enforced when the tool catalog is built, because it also covers the runtime's built-in names, which are not part of the manifest:
 
-1. **Reserved Tool Names:** Tool names MUST NOT start with `capsule_`. The prefix `capsule_` is reserved exclusively for runtime built-in tools (`capsule_info`, `capsule_runs`, `capsule_replay`).
-2. **Confusable Tool Names:** All tool names within a manifest MUST have distinct confusable skeletons (computed via NFKC normalization, lowercase folding, and homoglyph mapping). Clashing names MUST cause validation failure (`E_CONTENT`).
+1. **Reserved Tool Names:** Tool names MUST NOT start with `capsule_`. The prefix `capsule_` is reserved exclusively for runtime built-in tools (`capsule_info`, `capsule_runs`, `capsule_replay`). Manifest parsing (`src/format/manifest.ts:131`) enforces this rule, together with the rejection of exact duplicate tool names (`src/format/manifest.ts:134`); both fail with `E_CONTENT`.
+2. **Confusable Tool Names:** All tool names MUST have distinct confusable skeletons (computed via NFKC normalization, lowercase folding, and homoglyph mapping — `confusableSkeleton` in `src/security/text.ts:98`). This invariant is **not** enforced by `parseManifest`; it is enforced at catalog construction time, when the server refuses to serve the capsule at all rather than suppressing one of the clashing names: `assertNoToolNameCollision` (`src/mcp/catalog.ts:37`) throws `E_CONTENT` from the MCP server bootstrap (`src/mcp/server.ts:76`, which checks the manifest tools together with the built-ins so that a manifest name such as `Capsule_info` cannot shadow a built-in) and from the UI server bootstrap (`src/ui/server.ts:209`). Independently of the runtime path, conformance vector **C04** (§8) re-derives the skeletons of the manifest's tool names (`src/conformance/checks.ts:459`) and reports a collision as an `error`-severity `fail` result, which makes the report's verdict `ok: false`; vector results carry a detail string rather than an error code, so the `E_CONTENT` code above is what the servers throw, not what the report prints.
 3. **Capability Enclosure:**
    - If any tool declares `sql.query` or `sql.exec`, `capabilities.sql` MUST be `true`.
    - If any tool declares `kv.get` or `kv.set`, `capabilities.kv` MUST be `true`.
@@ -369,8 +369,8 @@ All operations that read the outside world, persist state, or perform side effec
 | `random.bytes` | `{ n: integer }` | Hexadecimal string | `1 <= n <= 64`. |
 | `kv.get` | `{ key: string }` | `string` or `null` | Key `<= 256` characters (UTF-16 code units). Requires `capabilities.kv = true`. |
 | `kv.set` | `{ key: string, value: string }` | `true` | Key `<= 256` characters (UTF-16 code units), value `<= 64` KiB (65,536 UTF-8 bytes), total table `<= 10,000` rows. Requires `capabilities.kv = true`. |
-| `sql.query` | `{ sql: string, params?: array }` | Array of row objects | Read-only connection. Max 1,000 rows, max 1 MiB serialized JSON. Requires `capabilities.sql = true`. |
-| `sql.exec` | `{ sql: string, params?: array }` | `{ changes: integer }` | Read-write connection. Tokenized keyword checks forbid `ATTACH`, `PRAGMA`, and `VACUUM`. Requires `capabilities.sql = true`. |
+| `sql.query` | `{ sql: string, params?: array }` | Array of row objects | Read-only connection. Same leading-keyword gate as `sql.exec`. Max 1,000 rows, max 1 MiB serialized JSON. Requires `capabilities.sql = true`. |
+| `sql.exec` | `{ sql: string, params?: array }` | `{ changes: integer }` | Read-write connection. Both SQL ports strip leading whitespace, comments and empty statements, then reject the statement with `E_POLICY` if its leading keyword is `ATTACH`, `DETACH`, `PRAGMA`, or `VACUUM` (`src/runtime/state.ts:14`). Requires `capabilities.sql = true`. |
 | `log.write` | `{ message: string }` | `true` | Message `<= 2` KiB. Stripped of ANSI escapes and control characters, written strictly to host `stderr`. |
 | `net.fetch` | `{ url: string, init?: object }` | `{ status, statusText, headers, body }` | HTTPS only (or HTTP on localhost). Host allowlist validation. SSRF protection (rejects RFC 1918 / link-local / cloud metadata IPs). Request `<= 1` MiB, response `<= 4` MiB, max 5 redirects. |
 | `pack.write` | `{ dir: string, out?: string }` | `{ file, capsuleId, bytes }` | **Schema-declared only in v0.1.** The effect name is part of the manifest schema and the effect vocabulary, and it is policy-gated by `capabilities.pack = true` plus the `pack` user grant, but no host port is wired and the determinism prelude (§4.3) exposes no guest binding for it: a dispatch of `pack.write` fails with `E_USAGE: pack.write is not available in this runtime`. Host implementation is targeted for v0.2; `capsule pack` is the v0.1 way to build a capsule. |
@@ -440,7 +440,7 @@ The journal records the following normative event types during execution:
 ### 6.4 Replay Modes
 
 The runtime supports two execution modes for tool invocation and deterministic auditing:
-1. **Record Mode (`mode = "record"`):** Standard tool invocation. Non-deterministic effects (`clock.now`, `random.bytes`, `sql.*`, `kv.*`, `net.fetch`, `log.write`, `pack.write`) are executed by host dispatchers, and each event with its parameters and results is appended to the hash-chained SQLite journal. When `CAPSULE_JOURNAL_ARGS=1` is set, invocation arguments are recorded in the journal to enable replay.
+1. **Record Mode (`mode = "record"`):** Standard tool invocation. Non-deterministic effects (`clock.now`, `random.bytes`, `sql.*`, `kv.*`, `net.fetch`, `log.write`) are executed by host dispatchers, and each event with its parameters and results is appended to the hash-chained SQLite journal. `pack.write` is absent from this list: it is declared in the v0.1 manifest schema, but no host port is wired in the shipped runtime (§5), so a dispatch throws `E_USAGE: pack.write is not available in this runtime` and no `pack.write` event is ever recorded. When `CAPSULE_JOURNAL_ARGS=1` is set, invocation arguments are recorded in the journal to enable replay.
 2. **Replay Mode (`mode = "replay"`):** Deterministic re-execution of guest code against recorded journal events. Effect results are served directly from the recorded sequence. Any divergence in effect sequence, operation name, or parameter digest triggers `E_NONDETERMINISM`.
 
 ---
