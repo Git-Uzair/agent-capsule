@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { newQuickJSAsyncWASMModule, shouldInterruptAfterDeadline } from "quickjs-emscripten";
 import type { QuickJSAsyncContext, QuickJSHandle } from "quickjs-emscripten";
 import { CapsuleError } from "../core/errors.ts";
@@ -20,12 +21,16 @@ export type RunGuestOptions = {
 
 /**
  * Triggering the call the prelude prepared. `this` at the top of an evaluated script is the guest's
- * global object — a keyword, so no declaration the capsule made can shadow it — and the invoker is a
- * non-writable, non-configurable property installed before the capsule ran, so this reaches the
- * host's invoker or nothing at all. Nothing else is looked up by name: an identifier here would be a
- * binding the capsule's own top-level `let` or `const` could have taken over.
+ * global object — a keyword, so no declaration the capsule made can shadow it, and no property the
+ * capsule redefined can stand in for it. Nothing else is looked up by name: an identifier here would
+ * be a binding the capsule's own top-level `let` or `const` could have taken over.
+ *
+ * The name is the host's, freshly drawn for this one call and given to the guest only after the
+ * capsule's source has run. A fixed name would not do: QuickJS honours `Object.defineProperty` on the
+ * global object even for a property the host installed as non-writable and non-configurable, so any
+ * name the capsule could write down or find by enumeration is a name it could replace.
  */
-const INVOKE = `this.__capsule_invoke()`;
+const invocation = (key: string): string => `this[${JSON.stringify(key)}]()`;
 
 /**
  * The host side of the guest ABI. It must never reject: a rejected promise inside an asyncified call
@@ -70,13 +75,13 @@ function failure(deadline: number, dumped: unknown): CapsuleError {
   return new CapsuleError("E_GUEST", sanitizeModelText(message, MAX_MESSAGE_CHARS) || "the guest failed");
 }
 
-/** Evaluates one piece of guest code and returns its value when that value is a string. */
-async function evaluate(
+/** Evaluates one piece of guest code and hands back its value; the caller owns the handle. */
+async function evaluateValue(
   context: QuickJSAsyncContext,
   deadline: number,
   code: string,
   filename: string,
-): Promise<string | undefined> {
+): Promise<QuickJSHandle> {
   let result;
   try {
     result = await context.evalCodeAsync(code, filename);
@@ -90,9 +95,18 @@ async function evaluate(
   if (result.error) {
     throw failure(deadline, result.error.consume(context.dump));
   }
-  return result.value.consume((handle) =>
-    context.typeof(handle) === "string" ? context.getString(handle) : undefined,
-  );
+  return result.value;
+}
+
+/** Evaluates one piece of guest code and returns its value when that value is a string. */
+async function evaluate(
+  context: QuickJSAsyncContext,
+  deadline: number,
+  code: string,
+  filename: string,
+): Promise<string | undefined> {
+  const value = await evaluateValue(context, deadline, code, filename);
+  return value.consume((handle) => (context.typeof(handle) === "string" ? context.getString(handle) : undefined));
 }
 
 /**
@@ -164,6 +178,7 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
   const deadline = Date.now() + opts.runtime.timeout_ms;
   const module = await newQuickJSAsyncWASMModule();
   const context = module.newContext();
+  let invoker: QuickJSHandle | undefined;
   try {
     context.runtime.setMemoryLimit(opts.runtime.memory_limit_mb * 1024 * 1024);
     context.runtime.setMaxStackSize(STACK_SIZE_BYTES);
@@ -188,11 +203,27 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
     setGlobal("__tool", context.newString(opts.tool));
     setGlobal("__args", context.newString(argsJson));
 
-    await evaluate(context, deadline, PRELUDE, "capsule:prelude");
+    // The prelude hands the invoker back instead of leaving it on the global object, so while the
+    // capsule's own source runs there is nothing for it to read, redefine or delete: the name below
+    // comes into existence after that source has finished, and no guest code runs between the two
+    // evaluations — pending jobs are never executed, so a microtask cannot look either.
+    invoker = await evaluateValue(context, deadline, PRELUDE, "capsule:prelude");
     await evaluate(context, deadline, opts.source, opts.entryPath);
 
-    return unwrap(await evaluate(context, deadline, INVOKE, "capsule:invoke"), opts.tool);
+    const key = `__capsule_invoke_${randomUUID().replaceAll("-", "")}`;
+    context.setProp(context.global, key, invoker);
+    // A capsule that froze its own global object has taken away the last door the host has to knock
+    // on — the invoker cannot be given a name there any more. That is the capsule's own doing and it
+    // is said plainly, rather than reported later as a tool that is somehow not a function.
+    const named = context
+      .getProp(context.global, key)
+      .consume((handle) => context.typeof(handle) === "function");
+    if (!named) {
+      throw new CapsuleError("E_GUEST", "the capsule made its global object unwritable", { tool: opts.tool });
+    }
+    return unwrap(await evaluate(context, deadline, invocation(key), "capsule:invoke"), opts.tool);
   } finally {
+    invoker?.dispose();
     context.dispose();
   }
 }
