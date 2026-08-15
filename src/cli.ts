@@ -2,6 +2,7 @@
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { packCommand } from "./commands/pack.ts";
+import { runCommand } from "./commands/run.ts";
 import { verifyCommand } from "./commands/verify.ts";
 
 type Command = (argv: string[]) => Promise<number>;
@@ -9,6 +10,7 @@ type Command = (argv: string[]) => Promise<number>;
 const COMMANDS = new Map<string, Command>([
   ["pack", packCommand],
   ["verify", verifyCommand],
+  ["run", runCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]
