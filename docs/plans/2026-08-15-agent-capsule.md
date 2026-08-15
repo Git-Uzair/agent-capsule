@@ -2238,10 +2238,14 @@ machine `node src/cli.ts install-handler --yes` followed by double-clicking
 
 ## Task 26 — Normative spec, threat model, README, roadmap
 
-**Status:** In Progress (Failed Verify Cycles: 2, Escalated to opus-coder)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 26 implementation -> verifier FAIL (README fixture path & CAPSULE_JOURNAL_ARGS, SPEC.md DDL/hash formula/limits/statement/signature shape inaccuracies, SECURITY.md port allowlist & error codes)
 - attempt 2: aligned README quickstart commands, SPEC.md DDL/hash formula/limits/statement/signature/events/built-in tools, and SECURITY.md port/error codes with implementation -> verifier FAIL (statement.files sha256 bare hex vs prefix, kv key character vs byte limit, pack.write runtime availability note, README directory diagram)
+- attempt 3: bare hex in statement.files sha256, kv key limit in characters (UTF-16 units), pack.write documented as declared-only in v0.1 with E_USAGE note in SPEC/ROADMAP, commands/ directory in README diagram -> verifier FAIL (SPEC.md confusable skeleton check enforcement site, DETACH in forbidden SQL keyword list, pack.write removal from section 6.4 executed list)
+- attempt 4: exact confusable collision site documented in §2.1, DETACH added to forbidden SQL keywords in §5, pack.write removed from §6.4 executed list -> verifier FAIL (duplicate tool name E_MANIFEST vs E_CONTENT, entry file existence enforced at pack time, pack.write effect.requested journal row, ROADMAP sqlite-vec milestone alignment)
+- attempt 5: E_MANIFEST for duplicate tool name, pack-time file existence checks documented, pack.write effect.requested row in §6.4, ROADMAP sqlite-vec milestone alignment in table and detail -> verifier FAIL (log.write limit in 2048 UTF-16 characters with silent truncation rather than 2 KiB byte refusal)
+- attempt 6 (opus-coder): SPEC §5 effect table rewritten with exact limits, units, and refusal vs truncation enforcement modes -> verifier PASS
 
 **Goal:** the documents that make v0.1 a *standard* rather than a program.
 **Difficulty:** EASY (but do not summarise away the detail — these are deliverables)
