@@ -78,8 +78,9 @@ const SCHEMA = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) as SchemaObject;
 const ajv = newValidator();
 const validate = ajv.compile<Manifest>(SCHEMA);
 
-/** Effects that are only legal when the matching capability flag is on. */
-const EFFECT_CAPABILITY: Partial<Record<EffectName, "sql" | "kv" | "pack">> = {
+/** Effects that are only legal when the matching capability flag is on. Shared with the policy
+ * engine, which re-checks it at call time: two copies of this table could drift apart. */
+export const EFFECT_CAPABILITY: Partial<Record<EffectName, "sql" | "kv" | "pack">> = {
   "sql.query": "sql",
   "sql.exec": "sql",
   "kv.get": "kv",
