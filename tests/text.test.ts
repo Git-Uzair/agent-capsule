@@ -44,6 +44,28 @@ test("sanitizeModelText collapses 3+ newlines to 2, trims whitespace, and applie
   assert.equal(sanitizeModelText(longText, 0), "");
 });
 
+test("sanitizeModelText preserves surrogate pairs during truncation and ensures output is well-formed", () => {
+  const inputWithSurrogate = "y".repeat(6) + "\u{1F600}" + "z".repeat(20);
+  const truncated = sanitizeModelText(inputWithSurrogate, 20);
+  assert.equal(truncated, "yyyyyy …[truncated]");
+  assert.equal((truncated as any).isWellFormed(), true);
+  assert.equal(/[\uD800-\uDFFF]/.test(truncated), false);
+
+  const emojiFullyIncluded = "y".repeat(5) + "\u{1F600}" + "z".repeat(20);
+  const truncatedWithEmoji = sanitizeModelText(emojiFullyIncluded, 20);
+  assert.equal(truncatedWithEmoji, "yyyyy\u{1F600} …[truncated]");
+  assert.equal((truncatedWithEmoji as any).isWellFormed(), true);
+});
+
+test("scanForInjection completes quickly on large inputs without ReDoS or CPU exhaustion", () => {
+  const largeInput = "curl " + "a".repeat(200_000) + " benign text";
+  const start = performance.now();
+  const result = scanForInjection(largeInput);
+  const duration = performance.now() - start;
+  assert.ok(duration < 50, `Expected duration < 50ms, took ${duration}ms`);
+  assert.deepEqual(result, []);
+});
+
 test("confusableSkeleton normalizes NFKC, lowercases, and maps Cyrillic/Greek homoglyphs to ASCII", () => {
   assert.equal(
     confusableSkeleton("а е о р с у х і ѕ ј"),

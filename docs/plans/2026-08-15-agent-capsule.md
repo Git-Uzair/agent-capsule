@@ -947,10 +947,10 @@ container with `.capsule/statement.json`, and assert: (a) `verifyStatement` reso
 
 ## Task 6 — Ed25519 signing, keystore, and TOFU trust store
 
-**Status:** In Progress (Failed Verify Cycles: 1)
+**Status:** Completed (PASS)
 **Attempt Ledger:**
 - attempt 1: initial Task 6 implementation -> verifier FAIL (prototype pollution / Object.prototype keys like constructor and __proto__ in trust store)
-- attempt 2: null-prototype `capsules` dictionary so `constructor`/`__proto__` are ordinary keys -> pending verify
+- attempt 2: null-prototype `capsules` dictionary so `constructor`/`__proto__` are ordinary keys -> verifier PASS
 
 **Goal:** provenance that actually exists (0 of ~11,700 scanned MCP servers ship signed releases).
 **Difficulty:** HARD (trust decisions; get the failure modes exactly right)
@@ -1004,6 +1004,8 @@ files outside `.tmp/`.
 ---
 
 ## Task 7 — `capsule pack`, the loader, and the reference fixture
+
+**Status:** Completed (PASS)
 
 **Goal:** produce and load a real signed `.capsule` end to end.
 **Difficulty:** HARD (the loader is the trust gate every other entry point calls)
@@ -1103,6 +1105,11 @@ in the cwd; prints the summary as one JSON line on stdout.
 ---
 
 ## Task 8 — Hostile-text hardening for everything a model can read
+
+**Status:** In Progress (Failed Verify Cycles: 1)
+**Attempt Ledger:**
+- attempt 1: initial Task 8 implementation -> verifier FAIL (surrogate pair split on truncation, unbounded input length in scanForInjection causing regex ReDoS)
+- attempt 2: back up boundary on high surrogate and bound scanForInjection input to 8192 chars -> pending verify
 
 **Goal:** treat capsule-authored strings as attacker-controlled input to the *recipient's agent*.
 **Difficulty:** EASY · *parallelizable with task 7*

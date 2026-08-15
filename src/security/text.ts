@@ -22,7 +22,14 @@ export function sanitizeModelText(s: string, max?: number): string {
     if (max <= TRUNCATION_SUFFIX.length) {
       return TRUNCATION_SUFFIX.slice(0, max);
     }
-    return result.slice(0, max - TRUNCATION_SUFFIX.length) + TRUNCATION_SUFFIX;
+    let cutLen = max - TRUNCATION_SUFFIX.length;
+    if (cutLen > 0) {
+      const code = result.charCodeAt(cutLen - 1);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        cutLen -= 1;
+      }
+    }
+    return result.slice(0, cutLen) + TRUNCATION_SUFFIX;
   }
 
   return result;
@@ -79,7 +86,7 @@ export function scanForInjection(s: string): string[] {
     if (typeof s !== "string") {
       return [];
     }
-    const clean = confusableSkeleton(sanitizeModelText(s));
+    const clean = confusableSkeleton(sanitizeModelText(s, 8192));
     const matched: string[] = [];
     for (const [name, regex] of INJECTION_PATTERNS) {
       if (regex.test(clean)) {
