@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { emptyDict } from "../security/store.ts";
 
@@ -26,6 +26,35 @@ export function generateMcpServerConfig(
     command: "agent-capsule",
     args: ["mcp", resolve(capsulePath)],
   };
+}
+
+/**
+ * Where a Microsoft Store install of Claude Desktop would actually read the given config, or
+ * `undefined` when the question does not arise. MSIX AppData virtualization gives the packaged app a
+ * private overlay under `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming`; once the app has
+ * written `claude_desktop_config.json` there, the copy shadows the classic `%APPDATA%\Claude` path
+ * for that app forever, and an edit to the classic file is applied into a void. Only the overlay
+ * *file* counts: while it does not exist, reads still fall through to the classic path.
+ */
+export function claudeStoreConfigPath(
+  configPath: string,
+  env: { appData?: string; packagesDir?: string } = {
+    appData: process.env.APPDATA,
+    packagesDir:
+      process.env.LOCALAPPDATA === undefined ? undefined : join(process.env.LOCALAPPDATA, "Packages"),
+  },
+): string | undefined {
+  if (env.appData === undefined || env.packagesDir === undefined) return undefined;
+  const classic = resolve(env.appData, "Claude", "claude_desktop_config.json");
+  // Windows paths compare caselessly; on other platforms APPDATA is unset and this never runs.
+  if (resolve(configPath).toLowerCase() !== classic.toLowerCase()) return undefined;
+  if (!existsSync(env.packagesDir)) return undefined;
+  for (const pkg of readdirSync(env.packagesDir)) {
+    if (!pkg.startsWith("Claude_")) continue;
+    const overlay = join(env.packagesDir, pkg, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json");
+    if (existsSync(overlay)) return overlay;
+  }
+  return undefined;
 }
 
 export function injectConfig(
@@ -141,8 +170,31 @@ export async function runInject(argv: string[]): Promise<number> {
 
   const output = injectConfig(existingJson, derivedName, serverConfig);
 
+  // Said whether or not anything is written: a target that a Store-sandboxed Claude Desktop will
+  // never read deserves the same warning on a dry run as on the real one.
+  const warnIfShadowed = (): void => {
+    if (configPath === undefined) return;
+    const overlay = claudeStoreConfigPath(configPath);
+    if (overlay === undefined) return;
+    process.stderr.write(
+      `warning: Claude Desktop is installed from the Microsoft Store here and reads its own copy of this config at\n` +
+        `  ${overlay}\n` +
+        `Changes to ${configPath} will not be seen; re-run with --client-config "${overlay}".\n`,
+    );
+  };
+
   if (configPath === undefined || stdoutMode || dryRun || !yes) {
     process.stdout.write(output);
+    // Printing the merged config is not writing it: without this line, a run that omitted `--yes`
+    // reports success in every way a user would check except the file itself.
+    if (configPath !== undefined && !stdoutMode) {
+      process.stderr.write(
+        dryRun
+          ? `dry run: nothing written to ${configPath}\n`
+          : `nothing written: re-run with --yes to update ${configPath}\n`,
+      );
+      warnIfShadowed();
+    }
     return 0;
   }
 
@@ -157,6 +209,7 @@ export async function runInject(argv: string[]): Promise<number> {
   await rename(tmpPath, configPath);
 
   process.stderr.write(`injected "${derivedName}" into ${configPath}\n`);
+  warnIfShadowed();
   return 0;
 }
 

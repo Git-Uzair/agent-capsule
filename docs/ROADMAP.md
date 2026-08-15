@@ -24,9 +24,10 @@
 - [x] **Quarantined Effect Ports:** Synchronous and asynchronous effect dispatches (`clock.now`, `random.bytes`, `sql.query`, `sql.exec`, `kv.get`, `kv.set`, `log.write`, `net.fetch`). `pack.write` is schema-declared in v0.1 — it is part of the manifest effect vocabulary and the capability/grant model — but no host port is wired, so dispatching it fails with `E_USAGE: pack.write is not available in this runtime`; the host-side implementation is targeted for v0.2 (see §3.8).
 - [x] **Hash-Chained Journal & Deterministic Replay:** Append-only event history in `<capsule>.journal.sqlite` supporting strict replay, divergence detection, and audit trails.
 - [x] **Model Context Protocol (MCP) `2026-07-28`:** Stateless JSON-RPC 2.0 transport over stdio, `server/discover`, caching metadata (`ttlMs`, `cacheScope`), and Model-Requested Tool Routing (MRTR) consent.
+- [x] **Legacy MCP Client Negotiation:** `initialize` echoes a client-requested revision from `{2025-06-18, 2025-03-26, 2024-11-05}` so pre-2026 clients (e.g. Claude Desktop 1.x) connect instead of disconnecting on an unknown version; on such sessions the MRTR consent question degrades to a readable `E_CONSENT` tool result naming the missing grants.
 - [x] **MCP Apps UI Extension:** Interactive user interfaces served over loopback HTTP and MCP Apps (`io.modelcontextprotocol/ui`) with Content Security Policy enforcement.
 - [x] **OpenTelemetry (OTel) Tracing:** Export OTLP trace spans for tool invocations and individual effect dispatches.
-- [x] **Ecosystem Interoperability:** Agent Plugins 1.0.0 export (`plugin.json`, `mcp.json`, `SKILL.md`), guarded client configuration injection (`capsule inject`), and Windows file association handler.
+- [x] **Ecosystem Interoperability:** Agent Plugins 1.0.0 export (`plugin.json`, `mcp.json`, `SKILL.md`), guarded client configuration injection (`capsule inject`) with explicit dry-run/no-write notices and Microsoft Store (MSIX) Claude Desktop shadow-config detection, and Windows file association handler.
 - [x] **Comprehensive Conformance Suite:** 12 normative vectors (C01–C12) verifying format legality, cryptographic validity, determinism, and performance budgets.
 
 ---

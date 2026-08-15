@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { generateMcpServerConfig, injectConfig, runInject } from "../src/commands/inject.ts";
+import { claudeStoreConfigPath, generateMcpServerConfig, injectConfig, runInject } from "../src/commands/inject.ts";
 import {
   buildRegCommands,
   generateLinuxDesktopFile,
@@ -266,6 +266,107 @@ test("runInject without --yes leaves file byte-identical", async () => {
     assert.equal(readFileSync(configFile, "utf8"), initialConfig);
     const parsedOut = JSON.parse(stdoutData);
     assert.ok(parsedOut.mcpServers.tool);
+  });
+});
+
+test("runInject says on stderr when nothing was written, and why", async () => {
+  await withTempDir(async (dir) => {
+    const capsuleFile = join(dir, "tool.capsule");
+    writeFileSync(capsuleFile, "dummy");
+    const configFile = join(dir, "config.json");
+
+    // Omitted --yes: the merged config goes to stdout, the file is untouched, and stderr says so —
+    // exit 0 alone must never read as "the client is configured".
+    const skipped = spawnSync(
+      process.execPath,
+      [CLI, "inject", capsuleFile, "--client-config", configFile],
+      { encoding: "utf8" },
+    );
+    assert.equal(skipped.status, 0);
+    assert.match(skipped.stderr, /nothing written: re-run with --yes/);
+    assert.equal(existsSync(configFile), false);
+
+    // An explicit dry run is reported as the dry run it is.
+    const dry = spawnSync(
+      process.execPath,
+      [CLI, "inject", capsuleFile, "--client-config", configFile, "--dry-run", "--yes"],
+      { encoding: "utf8" },
+    );
+    assert.equal(dry.status, 0);
+    assert.match(dry.stderr, /dry run: nothing written/);
+    assert.equal(existsSync(configFile), false);
+
+    // --stdout is the quiet mode: printing is the requested outcome, so there is nothing to warn about.
+    const piped = spawnSync(
+      process.execPath,
+      [CLI, "inject", capsuleFile, "--stdout"],
+      { encoding: "utf8" },
+    );
+    assert.equal(piped.status, 0);
+    assert.doesNotMatch(piped.stderr, /nothing written/);
+  });
+});
+
+test("claudeStoreConfigPath spots the Store overlay only for the shadowed classic path", () => {
+  return withTempDir((dir) => {
+    const appData = join(dir, "Roaming");
+    const packagesDir = join(dir, "Local", "Packages");
+    const classic = join(appData, "Claude", "claude_desktop_config.json");
+    const overlay = join(packagesDir, "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude", "claude_desktop_config.json");
+    const env = { appData, packagesDir };
+
+    // No overlay file yet: the packaged app still falls through to the classic path, so there is
+    // nothing to warn about — a directory alone is not shadowing.
+    mkdirSync(join(packagesDir, "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude"), { recursive: true });
+    assert.equal(claudeStoreConfigPath(classic, env), undefined);
+
+    // Once the app has written its copy, the classic path is shadowed and the overlay is reported.
+    writeFileSync(overlay, "{}");
+    assert.equal(claudeStoreConfigPath(classic, env), overlay);
+
+    // Windows paths compare caselessly, so a differently cased spelling of the same file matches.
+    assert.equal(claudeStoreConfigPath(classic.toUpperCase(), env), overlay);
+
+    // Any other target is not the shadowed file: another app's config, another file in the same
+    // directory, or a package family that is not Claude's.
+    assert.equal(claudeStoreConfigPath(join(dir, "elsewhere.json"), env), undefined);
+    assert.equal(claudeStoreConfigPath(join(appData, "Claude", "other.json"), env), undefined);
+    const otherPkg = join(packagesDir, "NotClaude_x", "LocalCache", "Roaming", "Claude");
+    mkdirSync(otherPkg, { recursive: true });
+    writeFileSync(join(otherPkg, "claude_desktop_config.json"), "{}");
+    rmSync(join(packagesDir, "Claude_pzs8sxrjxfjjc"), { recursive: true, force: true });
+    assert.equal(claudeStoreConfigPath(classic, env), undefined);
+
+    // Off Windows — or in any environment without the two roots — the question does not arise.
+    assert.equal(claudeStoreConfigPath(classic, { appData: undefined, packagesDir }), undefined);
+    assert.equal(claudeStoreConfigPath(classic, { appData, packagesDir: undefined }), undefined);
+    assert.equal(claudeStoreConfigPath(classic, { appData, packagesDir: join(dir, "missing") }), undefined);
+  });
+});
+
+test("runInject warns when the target is shadowed by a Store install of Claude Desktop", async () => {
+  await withTempDir(async (dir) => {
+    const capsuleFile = join(dir, "tool.capsule");
+    writeFileSync(capsuleFile, "dummy");
+    const appData = join(dir, "Roaming");
+    const localAppData = join(dir, "Local");
+    const classic = join(appData, "Claude", "claude_desktop_config.json");
+    const overlay = join(localAppData, "Packages", "Claude_abc", "LocalCache", "Roaming", "Claude");
+    mkdirSync(overlay, { recursive: true });
+    writeFileSync(join(overlay, "claude_desktop_config.json"), "{}");
+
+    const res = spawnSync(
+      process.execPath,
+      [CLI, "inject", capsuleFile, "--client-config", classic, "--yes"],
+      { encoding: "utf8", env: { ...process.env, APPDATA: appData, LOCALAPPDATA: localAppData } },
+    );
+    assert.equal(res.status, 0);
+    assert.match(res.stderr, /injected "tool" into /);
+    assert.match(res.stderr, /Microsoft Store/);
+    assert.match(res.stderr, /LocalCache/);
+    // The write itself still happened where the user pointed: the warning names the better target,
+    // it does not silently redirect the file.
+    assert.ok(existsSync(classic));
   });
 });
 

@@ -330,6 +330,42 @@ test("an ungranted net tool returns resultType input_required with a requestStat
   });
 });
 
+test("a session negotiated to a pre-2026 revision answers missing consent as a readable error", async () => {
+  await withHome(async (home) => {
+    const capsule = await packNetCapsule(home, "netlegacy");
+    const server = createMcpServer({ capsule });
+    await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 9000,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18" },
+    });
+
+    // No MRTR on this revision: the question would reach the client as an empty result it can
+    // neither render nor retry, so the missing grants come back as a result the model reads out.
+    const refused = await callTool(server, { name: "pull" });
+    assert.equal(refused.resultType, "complete");
+    assert.equal(refused.isError, true);
+    assert.equal(refused.inputRequests, undefined);
+    assert.equal(refused.requestState, undefined);
+    assert.match(textOf(refused), /^E_CONSENT: /);
+    assert.match(textOf(refused), new RegExp(NET_GRANT.replace(".", "\\.")));
+    assert.match(textOf(refused), /capsule ui /);
+    assert.equal(refused._meta?.["code"], "E_CONSENT");
+    assert.deepEqual(refused._meta?.["grants"], [NET_GRANT]);
+
+    // Nothing ran and nothing was granted: the same server, renegotiated to the native revision,
+    // asks the question the MRTR way again.
+    await server.handleMessage({
+      jsonrpc: "2.0",
+      id: 9001,
+      method: "initialize",
+      params: { protocolVersion: "2026-07-28" },
+    });
+    assert.equal((await callTool(server, { name: "pull" })).resultType, INPUT_REQUIRED);
+  });
+});
+
 test("retrying with allow-once inputResponses executes the tool", async () => {
   await withHome(async (home) => {
     const capsule = await packNetCapsule(home, "netonce");

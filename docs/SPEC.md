@@ -449,16 +449,17 @@ The runtime supports two execution modes for tool invocation and deterministic a
 
 ## 7. Model Context Protocol (MCP) Integration
 
-Agent Capsule implements the **Model Context Protocol specification `2026-07-28`** (stateless profile).
+Agent Capsule implements the **Model Context Protocol specification `2026-07-28`** (stateless profile), and negotiates `initialize` down to the pre-2026 revisions `2025-06-18`, `2025-03-26`, and `2024-11-05` for clients that do not speak `2026-07-28` yet.
 
 ### 7.1 Protocol Discovery & Transport
 
 - **Transport:** JSON-RPC 2.0 over standard input and standard output (`stdio`).
 - **Stdio Purity:** Standard output MUST contain only valid JSON-RPC 2.0 messages delimited by single newlines (`\n`). All logging and diagnostic output MUST be directed to standard error (`stderr`).
 - **Handshake & Discovery:**
-  - `server/discover`: Advertises protocol version `2026-07-28` and capabilities.
-  - `initialize`: Confirms protocol version and client metadata.
+  - `server/discover`: Advertises the native protocol version `2026-07-28`, the full negotiable `supportedVersions` list, and capabilities.
+  - `initialize`: Negotiates the protocol revision per the MCP versioning rules: when `params.protocolVersion` names a revision in `{2026-07-28, 2025-06-18, 2025-03-26, 2024-11-05}` the server MUST echo that revision back and serve the session at it; for any other value — or when the field is absent or not a string — the server MUST answer with its native `2026-07-28`, and disconnecting is then the client's decision. The result carries `serverInfo`, `capabilities`, and `instructions` (legacy clients never call `server/discover`, so `initialize` is their only source for it). A session that never sends `initialize` is served at the native revision, which is the only revision that permits the skip.
   - `ping`: Health verification.
+- **Legacy Session Degradation:** Every method this server answers is shape-compatible with the negotiated pre-2026 revisions (results MAY carry additional members such as `resultType`, `ttlMs`, `cacheScope`, and `structuredContent`, which those revisions ignore) with one exception: the MRTR consent flow (§7.4). On a session negotiated below `2026-07-28`, a `tools/call` that still requires user grants MUST NOT answer `input_required` — the client could neither render nor retry it — and MUST instead return a `complete` result with `isError: true` whose text names the missing grants and the ways to grant them (the capsule UI, or a `2026-07-28` client), with `_meta.code = "E_CONSENT"` and `_meta.grants` listing them.
 
 ### 7.2 Tool Discovery & Catalog Response (`tools/list`)
 

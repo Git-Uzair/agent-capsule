@@ -35,6 +35,11 @@ export type McpServerContext = {
   warn: (line: string) => void;
   /** The server identity written into every result's `_meta`. */
   resultMeta: Record<string, unknown>;
+  /**
+   * Whether `initialize` settled on a pre-2026 revision. A closure because the context is built
+   * before the handshake; absent means native, so a host that never negotiates loses nothing.
+   */
+  legacySession?: () => boolean;
 };
 
 /** The one content shape this server produces: text, cleaned before it reaches a model. */
@@ -213,6 +218,24 @@ export async function handleToolsCall(
 
   const missing = policy.missingGrants(name).filter((grant) => !approved.has(grant));
   if (missing.length > 0) {
+    // A pre-2026 revision has no MRTR: an `input_required` result would reach the client as an
+    // empty answer it cannot render, let alone retry. The question becomes a result the model can
+    // read out to the user instead — with the ways the grant can actually be given.
+    if (ctx.legacySession?.() === true) {
+      return {
+        resultType: "complete",
+        content: [
+          textContent(
+            `E_CONSENT: this tool needs user consent for: ${missing.join(", ")}. ` +
+              `This MCP session uses a revision without the consent flow, so approval cannot be asked for here. ` +
+              `Ask the user to grant it once via the capsule UI (capsule ui ${sanitizeModelText(ctx.capsule.file, 200)}) ` +
+              `or a client speaking MCP 2026-07-28, then call this tool again.`,
+          ),
+        ],
+        isError: true,
+        _meta: { code: "E_CONSENT", grants: missing, ...ctx.resultMeta },
+      };
+    }
     const requestState = signRequestState(
       { capsuleId, tool: name, argsDigest, grants: missing, exp: Date.now() + CONSENT_TTL_MS },
       loadStateKey(ctx.homeDir),

@@ -18,8 +18,22 @@ import {
   type Transport,
 } from "./transport.ts";
 
-/** The one MCP revision this server speaks. */
+/** The one MCP revision this server speaks natively. */
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
+
+/**
+ * Every revision `initialize` may settle on, newest first. The pre-2026 entries exist because real
+ * clients lag the specification — Claude Desktop 1.x requests `2025-06-18` and disconnects when the
+ * reply names a revision it does not know. Every method this server answers is shape-compatible with
+ * these revisions except the MRTR consent flow, which they cannot carry; `tools/call` degrades that
+ * one case to a readable `E_CONSENT` result instead (see `handleToolsCall`).
+ */
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
+  MCP_PROTOCOL_VERSION,
+  "2025-06-18",
+  "2025-03-26",
+  "2024-11-05",
+];
 /** The capsule specification the container itself conforms to. */
 export const CAPSULE_SPEC = "agentcapsule.org/0.1";
 
@@ -80,6 +94,11 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
   const tools = buildToolList(manifest, { allowSuspicious: opts.allowSuspicious === true, warn });
   const resources = listResources(manifest);
 
+  // The revision this session settled on. Until `initialize` says otherwise the server is native:
+  // the stateless profile allows a client to skip `initialize` entirely, and such a client is a
+  // `2026-07-28` client by definition — no earlier revision permits the skip.
+  let negotiatedVersion: string = MCP_PROTOCOL_VERSION;
+
   const serverInfo = { name: manifest.meta.name, version: manifest.meta.version };
   // The `_meta` name is namespaced (`capsule/<name>`) so an agent talking to several servers can tell
   // a capsule from a native MCP server; the `serverInfo`/`server` fields carry the capsule's own name.
@@ -97,6 +116,8 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     homeDir: opts.homeDir,
     warn,
     resultMeta,
+    // A closure, not a value: the context is built before `initialize` has run.
+    legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
   };
 
   const result = (body: Record<string, unknown>, meta?: Record<string, unknown>): Record<string, unknown> => ({
@@ -159,14 +180,31 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
   const handlers = new Map<string, (params: unknown) => Record<string, unknown> | Promise<Record<string, unknown>>>([
     [
       "initialize",
-      () => result({ protocolVersion: MCP_PROTOCOL_VERSION, serverInfo, capabilities: capabilities() }),
+      (params) => {
+        // Version negotiation as the specification orders it: a requested revision the server can
+        // serve is echoed back; anything else — including no request at all — is answered with the
+        // native revision, and disconnecting is then the client's call.
+        const requested = asRecord(params)?.["protocolVersion"];
+        negotiatedVersion =
+          typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+            ? requested
+            : MCP_PROTOCOL_VERSION;
+        // `instructions` rides along for every revision: a legacy client never calls
+        // `server/discover`, so this is the only place it can learn what the capsule may do.
+        return result({
+          protocolVersion: negotiatedVersion,
+          serverInfo,
+          capabilities: capabilities(),
+          instructions: instructions(),
+        });
+      },
     ],
     [
       "server/discover",
       () =>
         result({
           spec: MCP_PROTOCOL_VERSION,
-          supportedVersions: [MCP_PROTOCOL_VERSION],
+          supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
           server: serverInfo,
           capsule: {
             capsuleId: capsule.capsuleId,

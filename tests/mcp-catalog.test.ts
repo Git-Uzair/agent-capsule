@@ -5,7 +5,12 @@ import { randomUUID } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
-import { MCP_PROTOCOL_VERSION, createMcpServer, type McpServer } from "../src/mcp/server.ts";
+import {
+  MCP_PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
+  createMcpServer,
+  type McpServer,
+} from "../src/mcp/server.ts";
 import { JSON_RPC_ERROR, type JsonRpcRequest } from "../src/mcp/transport.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
@@ -137,7 +142,7 @@ function toolsOf(result: Record<string, unknown>): ListedTool[] {
   return result["tools"] as ListedTool[];
 }
 
-test("discover advertises exactly one supported version and the ui extension", async () => {
+test("discover advertises the native spec, every negotiable version and the ui extension", async () => {
   await withHome(async (home) => {
     const capsule = await packCapsule(home);
     const server = createMcpServer({ capsule });
@@ -145,7 +150,9 @@ test("discover advertises exactly one supported version and the ui extension", a
     const result = await callOk(server, "server/discover");
 
     assert.equal(result["spec"], MCP_PROTOCOL_VERSION);
-    assert.deepEqual(result["supportedVersions"], [MCP_PROTOCOL_VERSION]);
+    assert.deepEqual(result["supportedVersions"], [...SUPPORTED_PROTOCOL_VERSIONS]);
+    // The native revision leads the list: it is what a client that never negotiates is served.
+    assert.equal(SUPPORTED_PROTOCOL_VERSIONS[0], MCP_PROTOCOL_VERSION);
     assert.deepEqual(result["server"], { name: "hello", version: "1.0.0" });
     assert.deepEqual(result["capsule"], {
       capsuleId: capsule.capsuleId,
@@ -201,6 +208,38 @@ test("initialize, ping and notifications/initialized answer the handshake", asyn
       await server.handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" }),
       undefined,
     );
+  });
+});
+
+test("initialize negotiates a supported legacy revision and answers native otherwise", async () => {
+  await withHome(async (home) => {
+    const capsule = await packCapsule(home);
+
+    // A requested revision the server can serve is echoed back, as the specification's negotiation
+    // requires — this is what lets a 2025-era Claude Desktop proceed instead of disconnecting.
+    for (const version of SUPPORTED_PROTOCOL_VERSIONS) {
+      const echoed = await callOk(createMcpServer({ capsule }), "initialize", {
+        protocolVersion: version,
+        capabilities: {},
+        clientInfo: { name: "claude-ai", version: "0.1.0" },
+      });
+      assert.equal(echoed["protocolVersion"], version);
+      // Legacy clients never call `server/discover`, so `initialize` itself carries instructions.
+      assert.match(String(echoed["instructions"]), /sandboxed; its declared capabilities are kv/);
+    }
+
+    // A revision this server has never heard of is answered with the native one — "respond with the
+    // latest version the server supports" — and disconnecting is then the client's decision.
+    const unknown = await callOk(createMcpServer({ capsule }), "initialize", {
+      protocolVersion: "1999-01-01",
+    });
+    assert.equal(unknown["protocolVersion"], MCP_PROTOCOL_VERSION);
+
+    // A request that names no revision at all stays native, malformed params included.
+    for (const params of [undefined, {}, { protocolVersion: 7 }]) {
+      const bare = await callOk(createMcpServer({ capsule }), "initialize", params);
+      assert.equal(bare["protocolVersion"], MCP_PROTOCOL_VERSION, JSON.stringify(params));
+    }
   });
 });
 
