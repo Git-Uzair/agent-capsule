@@ -61,7 +61,7 @@ Agent Capsule treats the capsule as untrusted, the network as adversarial, and t
 
 ```bash
 # Pack a project directory into a signed capsule
-node src/cli.ts pack ./fixtures/hello -o hello.capsule
+node src/cli.ts pack tests/fixtures/hello -o hello.capsule
 
 # Verify cryptographic signature, container digests, and TOFU key pinning
 node src/cli.ts verify hello.capsule
@@ -70,8 +70,8 @@ node src/cli.ts verify hello.capsule
 ### Run and Replay Tools
 
 ```bash
-# Execute a tool directly from the CLI
-node src/cli.ts run hello.capsule --tool greet --args '{"name":"Ada"}'
+# Execute a tool directly from the CLI (set CAPSULE_JOURNAL_ARGS=1 so arguments are recorded for replay)
+CAPSULE_JOURNAL_ARGS=1 node src/cli.ts run hello.capsule --tool greet --args '{"name":"Ada"}'
 
 # Replay the execution deterministically from the journal
 node src/cli.ts replay hello.capsule
@@ -104,7 +104,7 @@ The CLI is available as `capsule` or `agent-capsule`:
 | :--- | :--- | :--- |
 | `pack` | `capsule pack <dir> [-o out.capsule]` | Pack a directory into a deterministic, signed `.capsule` archive. |
 | `verify` | `capsule verify <file> [--json] [--allow-suspicious] [--accept-drift]` | Verify container integrity, Ed25519 signatures, and trust state. |
-| `run` | `capsule run <file> --tool <name> [--args '<json>'] [--trace]` | Invoke a tool directly in the sandbox and record execution in journal. |
+| `run` | `capsule run <file> --tool <name> [--args '<json>'] [--trace]` | Invoke a tool directly in the sandbox and record execution in journal (`CAPSULE_JOURNAL_ARGS=1` records args for replay). |
 | `replay` | `capsule replay <file> [--run <runId>] [--json]` | Replay a recorded run deterministically and verify zero divergence. |
 | `mcp` | `capsule mcp <file> [--accept-drift] [--allow-suspicious]` | Start stateless MCP `2026-07-28` JSON-RPC server over stdio. |
 | `ui` | `capsule ui <file> [--port <n>] [--timeout <min>] [--no-open]` | Start authenticated loopback HTTP server and open embedded UI in browser. |

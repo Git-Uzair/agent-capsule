@@ -59,13 +59,13 @@ To guarantee content-addressable identity, reproducible builds, and defense agai
    - Entry paths MUST NOT exceed 256 bytes in UTF-8 length.
    - Entry paths MUST belong to one of the following root prefixes: `capsule.json`, `src/`, `ui/`, `data/`, or `.capsule/`.
 
-3. **Archive Integrity:**
+3. **Archive Integrity & Limits:**
+   - Total number of entries MUST NOT exceed 4,096 (`MAX_ENTRIES = 4096`).
+   - Individual uncompressed entry size MUST NOT exceed 32 MiB (`MAX_ENTRY = 32 * 1024 * 1024` bytes).
+   - Total uncompressed size of all entries MUST NOT exceed 64 MiB (`MAX_TOTAL = 64 * 1024 * 1024` bytes).
    - Central Directory records MUST strictly match the local file header declarations.
    - Duplicate entry paths MUST NOT exist in the archive. An archive declaring duplicate paths MUST be rejected with `E_CONTAINER`.
    - Archives containing unlisted hidden entries or trailing central directory anomalies MUST be rejected with `E_CONTAINER`.
-   - Individual uncompressed entry size MUST NOT exceed 64 MiB.
-   - Total uncompressed size of all entries MUST NOT exceed 256 MiB.
-   - Compression expansion ratio (uncompressed size / compressed size) MUST NOT exceed 100:1 to prevent ZIP bomb denial of service.
 
 ---
 
@@ -233,7 +233,7 @@ The manifest file `capsule.json` MUST be located at the root of the archive and 
 
 A conforming runtime MUST enforce the following semantic invariants when parsing `capsule.json`:
 
-1. **Reserved Tool Names:** Tool names MUST NOT start with `capsule_`. The prefix `capsule_` is reserved exclusively for runtime built-in tools (`capsule_info`, `capsule_runs`, `capsule_replay`, `capsule_pack`).
+1. **Reserved Tool Names:** Tool names MUST NOT start with `capsule_`. The prefix `capsule_` is reserved exclusively for runtime built-in tools (`capsule_info`, `capsule_runs`, `capsule_replay`).
 2. **Confusable Tool Names:** All tool names within a manifest MUST have distinct confusable skeletons (computed via NFKC normalization, lowercase folding, and homoglyph mapping). Clashing names MUST cause validation failure (`E_CONTENT`).
 3. **Capability Enclosure:**
    - If any tool declares `sql.query` or `sql.exec`, `capabilities.sql` MUST be `true`.
@@ -252,46 +252,53 @@ Provenance in Agent Capsule is established via in-toto-inspired attestation stat
 
 ### 3.1 Statement Document (`.capsule/statement.json`)
 
-The statement document binds the capsule identity, individual payload file digests, and the tool catalog digest:
+The statement document binds the capsule identity, individual payload file digests, builder metadata, and the tool catalog digest:
 
 ```json
 {
-  "_type": "https://in-toto.io/Statement/v1",
+  "spec": "agentcapsule.org/statement/0.1",
   "subject": {
     "name": "my-tool",
     "version": "1.0.0",
     "payloadDigest": "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
   },
-  "predicateType": "https://agentcapsule.org/attestation/v1",
-  "predicate": {
-    "toolCatalogDigest": "sha256:c06f8ff2ada78badb1f22c23fc07ada1b59e36b01397558899e03f366c3b8057"
-  },
   "files": [
     { "path": "capsule.json", "sha256": "sha256:...", "size": 1240 },
     { "path": "src/main.js", "sha256": "sha256:...", "size": 3412 },
     { "path": "ui/index.html", "sha256": "sha256:...", "size": 5120 }
-  ]
+  ],
+  "predicate": {
+    "builder": {
+      "name": "agent-capsule",
+      "version": "0.1.0"
+    },
+    "toolCatalogDigest": "sha256:c06f8ff2ada78badb1f22c23fc07ada1b59e36b01397558899e03f366c3b8057"
+  }
 }
 ```
 
-1. **File Digest Calculation:** `files` contains all archive entries excluding `.capsule/statement.json` and `.capsule/signature.json`, sorted by `path` in UTF-8 code unit order. Each entry specifies `path`, `sha256:hex`, and uncompressed `size`.
-2. **Payload Digest (`payloadDigest`):** The SHA-256 digest of the RFC 8785 canonical JSON encoding of the `files` array.
-3. **Tool Catalog Digest (`toolCatalogDigest`):** The SHA-256 digest of the RFC 8785 canonical JSON representation of normalized tool declarations (sorted by tool name).
+1. **Specification Identifier (`spec`):** MUST be `"agentcapsule.org/statement/0.1"`.
+2. **Subject (`subject`):** Binds the capsule `name`, `version`, and `payloadDigest`.
+3. **Files Array (`files`):** Contains all archive entries excluding `.capsule/statement.json` and `.capsule/signature.json`, sorted by `path` in UTF-8 code unit order. Each entry specifies `path`, `sha256` (hex-encoded SHA-256 with `sha256:` prefix), and uncompressed `size` in bytes.
+4. **Payload Digest (`payloadDigest`):** The `digestOf` calculation (`sha256:` + hex hash of RFC 8785 canonical JSON) of the `files` array.
+5. **Predicate (`predicate`):** Contains `builder` (`{ name, version }`) and `toolCatalogDigest`.
+6. **Tool Catalog Digest (`toolCatalogDigest`):** The `digestOf` calculation of normalized tool declarations from `capsule.json` (sorted by tool name).
 
 ### 3.2 Signature Document (`.capsule/signature.json`)
 
 ```json
 {
-  "algorithm": "ed25519",
-  "keyId": "sha256:d6b6...hex",
+  "alg": "ed25519",
   "publicKey": "MCowBQYDK2VwAyEA...",
+  "keyId": "sha256:d6b6...hex",
   "signature": "k2v1...base64"
 }
 ```
 
-1. **Canonicalization:** The statement document MUST be canonicalized according to RFC 8785 (JSON Canonicalization Scheme - JCS).
-2. **Key Identifier (`keyId`):** Derived as `sha256:<hex>` over the raw DER-encoded SubjectPublicKeyInfo (SPKI) bytes of the Ed25519 public key.
-3. **Signature:** Base64-encoded 64-byte Ed25519 signature over the UTF-8 bytes of `RFC8785(statement.json)`.
+1. **Algorithm (`alg`):** MUST be `"ed25519"`.
+2. **Public Key (`publicKey`):** Base64-encoded SubjectPublicKeyInfo (SPKI) DER representation of the Ed25519 public key.
+3. **Key Identifier (`keyId`):** Derived as `sha256:<hex>` over the raw DER-encoded SPKI bytes of the Ed25519 public key.
+4. **Signature (`signature`):** Base64-encoded 64-byte Ed25519 signature over the UTF-8 bytes of `RFC8785(statement.json)`.
 
 ### 3.3 Trust-on-First-Use (TOFU) Keystore
 
@@ -381,53 +388,60 @@ Every tool execution generates an immutable, hash-chained log stored in `<capsul
 ### 6.1 Journal Schema
 
 ```sql
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA foreign_keys=ON;
+
 CREATE TABLE IF NOT EXISTS capsule_runs (
-  run_id TEXT PRIMARY KEY,
+  run_id     TEXT PRIMARY KEY,
   capsule_id TEXT NOT NULL,
-  tool_name TEXT NOT NULL,
-  started_at TEXT NOT NULL,
-  finished_at TEXT,
-  status TEXT NOT NULL,
-  error_code TEXT,
-  error_message TEXT,
-  effects_count INTEGER NOT NULL DEFAULT 0,
-  duration_ms INTEGER
+  tool       TEXT NOT NULL,
+  mode       TEXT NOT NULL CHECK (mode IN ('record','replay')),
+  status     TEXT NOT NULL CHECK (status IN ('running','ok','error')),
+  started_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS capsule_events (
-  event_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL,
-  event_type TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id    TEXT NOT NULL REFERENCES capsule_runs(run_id),
+  idx       INTEGER NOT NULL,
+  type      TEXT NOT NULL,
+  payload   TEXT NOT NULL,
   prev_hash TEXT NOT NULL,
-  event_hash TEXT NOT NULL
+  hash      TEXT NOT NULL,
+  UNIQUE (run_id, idx)
 );
 ```
 
 ### 6.2 Hash-Chain Calculation
 
-For each event at ordinal $k \ge 0$:
-$$\text{prev\_hash}_0 = \text{"0".repeat(64)}$$
-$$\text{prev\_hash}_k = \text{event\_hash}_{k-1} \quad (k > 0)$$
-$$\text{event\_hash}_k = \text{SHA256}(\text{prev\_hash}_k \parallel \text{":"} \parallel \text{run\_id} \parallel \text{":"} \parallel k \parallel \text{":"} \parallel \text{event\_type} \parallel \text{":"} \parallel \text{RFC8785}(\text{payload}))$$
+For each event at index `idx >= 0` within a run `run_id`:
+- For the genesis event (`idx = 0`):
+  `prev_hash = "sha256:" + "0".repeat(64)`
+- For subsequent events (`idx > 0`):
+  `prev_hash = previous_event.hash`
+- Event hash formula:
+  `hash = "sha256:" + sha256Hex(canonicalize({ run_id, idx, type, payload, prev_hash }))`
+  where `canonicalize` denotes RFC 8785 JSON Canonicalization Scheme (JCS) and `sha256Hex` computes the lowercase hexadecimal SHA-256 digest.
 
 ### 6.3 Event Vocabulary
 
-1. `tool.proposed`: Initial invocation intent with parameter digest.
-2. `tool.started`: Execution commencement.
-3. `effect.requested`: Effect ordinal $i$, operation name, and parameter digest.
-4. `effect.completed`: Effect ordinal $i$, returned value, value digest, and bucketed duration ($10\text{ ms}$ buckets in record mode; omitted in replay).
-5. `effect.failed`: Effect failure information.
-6. `tool.completed`: Successful completion with return value digest.
-7. `tool.failed`: Execution failure with error code.
+The journal records the following normative event types during execution:
+1. `run.started`: Run initialization with run metadata.
+2. `tool.proposed`: Tool invocation proposed with arguments or argument digest.
+3. `tool.authorized`: Tool execution authorized following capability/policy check.
+4. `interrupt.raised`: Interactive interrupt raised (e.g. Model-Requested Tool Routing).
+5. `interrupt.resolved`: Interactive interrupt resolved with user consent response.
+6. `effect.requested`: Effect invocation requested with operation name and parameters.
+7. `effect.completed`: Effect execution completed with return value and elapsed duration.
+8. `tool.completed`: Tool execution completed with return value or error.
+9. `run.finished`: Run lifecycle finished with terminal status (`ok` or `error`).
 
-### 6.4 Replay Verification Modes
+### 6.4 Replay Modes
 
-1. **Inspect:** Read and audit historical runs and effect sequences without code execution.
-2. **Replay-Recorded:** Re-executes guest code against recorded journal effects. Divergences in effect ordering, operation names, parameter digests, or unexpected successes/failures trigger `E_NONDETERMINISM`.
-3. **Replay-Live:** Re-executes guest code against current external state and network ports, journaling a new run for comparative analysis.
-4. **Fork:** Branches from a specified historical checkpoint.
+The runtime supports two execution modes for tool invocation and deterministic auditing:
+1. **Record Mode (`mode = "record"`):** Standard tool invocation. Non-deterministic effects (`clock.now`, `random.bytes`, `sql.*`, `kv.*`, `net.fetch`, `log.write`, `pack.write`) are executed by host dispatchers, and each event with its parameters and results is appended to the hash-chained SQLite journal. When `CAPSULE_JOURNAL_ARGS=1` is set, invocation arguments are recorded in the journal to enable replay.
+2. **Replay Mode (`mode = "replay"`):** Deterministic re-execution of guest code against recorded journal events. Effect results are served directly from the recorded sequence. Any divergence in effect sequence, operation name, or parameter digest triggers `E_NONDETERMINISM`.
 
 ---
 
@@ -444,10 +458,80 @@ Agent Capsule implements the **Model Context Protocol specification `2026-07-28`
   - `initialize`: Confirms protocol version and client metadata.
   - `ping`: Health verification.
 
-### 7.2 Tool Discovery & Sanitization (`tools/list`)
+### 7.2 Tool Discovery & Catalog Response (`tools/list`)
 
 1. Manifest tools are merged with built-in tools (`capsule_info`, `capsule_runs`, `capsule_replay`).
-2. Catalog responses include caching headers: `_meta: { ttlMs: 3600000, cacheScope: "session" }`.
+2. Catalog response format:
+   The `tools/list` response envelope includes top-level `resultType`, caching directives (`ttlMs: 3600000`, `cacheScope: "public"`), and server metadata in `_meta`:
+```json
+{
+  "resultType": "complete",
+  "tools": [
+    {
+      "name": "greet",
+      "title": "Greet User",
+      "description": "Returns a personalized greeting.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+      },
+      "effects": []
+    },
+    {
+      "name": "capsule_info",
+      "title": "Capsule Information",
+      "description": "Introspect capsule metadata, capabilities, trust state, publisher key, and tool list with effects.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "effects": []
+    },
+    {
+      "name": "capsule_runs",
+      "title": "Capsule Runs",
+      "description": "Query recent execution runs from the journal sidecar, newest first.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          }
+        },
+        "additionalProperties": false
+      },
+      "effects": []
+    },
+    {
+      "name": "capsule_replay",
+      "title": "Capsule Replay",
+      "description": "Replay a recorded run to verify deterministic execution.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "runId": { "type": "string" }
+        },
+        "required": ["runId"],
+        "additionalProperties": false
+      },
+      "effects": []
+    }
+  ],
+  "ttlMs": 3600000,
+  "cacheScope": "public",
+  "_meta": {
+    "io.modelcontextprotocol/serverInfo": {
+      "name": "capsule/my-tool",
+      "version": "1.0.0"
+    }
+  }
+}
+```
 3. **Security Screening:** Tool titles, descriptions, and JSON Schema strings are processed through the sanitization engine:
    - Unicode NFKC normalization.
    - ANSI escape sequence removal.
@@ -472,9 +556,9 @@ When a capsule defines `ui.app`:
 
 | Built-In Tool | Parameters | Description |
 | :--- | :--- | :--- |
-| `capsule_info` | `{}` | Returns manifest metadata, capabilities, publisher keyId, trust status, and tool catalog. |
-| `capsule_runs` | `{ limit?: integer }` | Lists recent execution runs from the journal (newest first). |
-| `capsule_replay` | `{ runId: string }` | Replays a recorded execution run deterministically and reports verification result. |
+| `capsule_info` | `{}` | Introspect capsule metadata, capabilities, trust state, publisher key, and tool list with effects. |
+| `capsule_runs` | `{ limit?: integer }` | Query recent execution runs from the journal sidecar, newest first (limit: 1–50, default: 10). |
+| `capsule_replay` | `{ runId: string }` | Replay a recorded run to verify deterministic execution. |
 
 ---
 
@@ -511,7 +595,7 @@ This specification deliberately diverges from the exploratory proposal (`docs/ag
 | **Non-Determinism** | Unrestricted host functions | Quarantined Effect Ports & Hash-Chained Journal | Durable execution pattern enables mathematical proof of replayability, audit trails, and regression verification. |
 | **Protocol Version** | MCP 2024 draft with server-initiated elicitation | MCP `2026-07-28` stateless profile with MRTR | Modern MCP standardizes stateless servers, `_meta` request state, result types, and Model-Requested Tool Routing. |
 | **Security Scope** | Sandbox boundaries only | Multi-layer: Signatures, TOFU, catalog drift detection, injection filtering | Real-world MCP security research demonstrates tool-poisoning, prompt injection, and silent catalog mutation (rug pulls) are primary threat vectors. |
-| **Quine Builder** | Embedded compiler toolchain in every file | Host-provided `capsule_pack` effect/tool | Eliminates bloated duplicated toolchains inside every package while preserving the ability for any capsule to produce capsules. |
+| **Quine Builder** | Embedded compiler toolchain in every file | Host-provided `pack.write` effect and `capsule pack` tool | Eliminates bloated duplicated toolchains inside every package while preserving the ability for any capsule to produce capsules. |
 
 ---
 

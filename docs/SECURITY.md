@@ -90,7 +90,7 @@ Agent Capsule assumes a zero-trust computing model where:
   - Network requests MUST match declared `capabilities.net.allowed_hosts`.
   - DNS resolution verifies that resolved IPv4/IPv6 addresses do NOT belong to private, link-local, carrier-grade NAT, or loopback ranges (unless `allow_localhost` is explicitly granted).
   - Credentials in URLs (`https://user:pass@host`) are strictly forbidden.
-  - Non-standard HTTP ports are blocked (only 80 and 443 are allowed; arbitrary ports allowed only for localhost).
+  - Port allowlist: Outbound connections are restricted to standard web ports (80, 443) and unprivileged ports in the range 1024–65535. Privileged system ports (<1024 except 80 and 443) are blocked.
   - Request bodies are capped at 1 MiB; response bodies are capped at 4 MiB as they stream.
   - Hop-by-hop and credential headers (`Authorization`, `Cookie`) are stripped upon following redirects (capped at 5 hops).
 
@@ -116,8 +116,8 @@ Agent Capsule assumes a zero-trust computing model where:
 
 - **Threat:** A compromised process alters execution history to hide unauthorized actions.
 - **Defenses:**
-  - Journal events are linked via SHA-256 hash chains ($\text{event\_hash}_k$).
-  - Missing, reordered, or modified journal events trigger hash chain verification errors (`E_CONTAINER`).
+  - Journal events are linked via SHA-256 hash chains (`hash = "sha256:" + sha256Hex(canonicalize({ run_id, idx, type, payload, prev_hash }))`).
+  - Missing, reordered, or modified journal events trigger hash chain verification errors (`E_DIGEST`).
   - The journal database resides in a separate sidecar file (`<name>.journal.sqlite`), isolated from guest SQL write handles.
 
 ---
