@@ -2238,9 +2238,10 @@ machine `node src/cli.ts install-handler --yes` followed by double-clicking
 
 ## Task 26 — Normative spec, threat model, README, roadmap
 
-**Status:** In Progress (User override: unlimited verification cycles)
+**Status:** In Progress (Failed Verify Cycles: 2, Escalated to opus-coder)
 **Attempt Ledger:**
 - attempt 1: initial Task 26 implementation -> verifier FAIL (README fixture path & CAPSULE_JOURNAL_ARGS, SPEC.md DDL/hash formula/limits/statement/signature shape inaccuracies, SECURITY.md port allowlist & error codes)
+- attempt 2: aligned README quickstart commands, SPEC.md DDL/hash formula/limits/statement/signature/events/built-in tools, and SECURITY.md port/error codes with implementation -> verifier FAIL (statement.files sha256 bare hex vs prefix, kv key character vs byte limit, pack.write runtime availability note, README directory diagram)
 
 **Goal:** the documents that make v0.1 a *standard* rather than a program.
 **Difficulty:** EASY (but do not summarise away the detail — these are deliverables)

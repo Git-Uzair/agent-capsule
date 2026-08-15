@@ -24,7 +24,7 @@ HOST RUNTIME (Node.js 24+)                             MUTABLE SIDECARS (never s
 │ CLI ──┬── mcp/         stdio JSON-RPC (2026-07) │    └── <name>.journal.sqlite  hash-chained journal
 │       ├── ui/          loopback HTTP + token    │
 │       ├── conformance/ 12 normative vectors     │
-│       └── interop/     Agent Plugins & inject   │
+│       └── commands/    Agent Plugins & inject   │
 │                                                 │
 │  invoke.ts ──► validate args against Ajv 2020   │
 │            ──► journal tool.proposed            │

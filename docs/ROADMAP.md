@@ -21,7 +21,7 @@
 - [x] **Cryptographic Provenance:** In-toto attestation statements, RFC 8785 JSON Canonicalization (JCS), and Ed25519 signatures.
 - [x] **Trust-on-First-Use (TOFU) Keystore:** Automatic key pinning, key drift detection, and tool catalog digest pinning.
 - [x] **Zero-Ambient-Authority Sandbox:** QuickJS-in-Wasm execution with virtualized clocks (`Date`), deterministic random numbers (`Math.random`), memory caps, and CPU deadline interrupts.
-- [x] **Quarantined Effect Ports:** Synchronous and asynchronous effect dispatches (`clock.now`, `random.bytes`, `sql.query`, `sql.exec`, `kv.get`, `kv.set`, `log.write`, `net.fetch`, `pack.write`).
+- [x] **Quarantined Effect Ports:** Synchronous and asynchronous effect dispatches (`clock.now`, `random.bytes`, `sql.query`, `sql.exec`, `kv.get`, `kv.set`, `log.write`, `net.fetch`). `pack.write` is schema-declared in v0.1 — it is part of the manifest effect vocabulary and the capability/grant model — but no host port is wired, so dispatching it fails with `E_USAGE: pack.write is not available in this runtime`; the host-side implementation is targeted for v0.2 (see §3.8).
 - [x] **Hash-Chained Journal & Deterministic Replay:** Append-only event history in `<capsule>.journal.sqlite` supporting strict replay, divergence detection, and audit trails.
 - [x] **Model Context Protocol (MCP) `2026-07-28`:** Stateless JSON-RPC 2.0 transport over stdio, `server/discover`, caching metadata (`ttlMs`, `cacheScope`), and Model-Requested Tool Routing (MRTR) consent.
 - [x] **MCP Apps UI Extension:** Interactive user interfaces served over loopback HTTP and MCP Apps (`io.modelcontextprotocol/ui`) with Content Security Policy enforcement.
@@ -73,6 +73,12 @@
 
 - **Scope:** Experimental tier for Actually Portable Executables (APE).
 - **Strict Acceptance Gate:** Must survive Windows Defender cloud heuristics, macOS Gatekeeper notarization, and Linux execution on clean test VMs without false positives. If any scanner quarantines the binary, the feature will not ship to stable.
+
+### 3.8 Host `pack.write` Effect Port
+
+- **Context & Evidence:** v0.1 declares `pack.write` in the manifest effect vocabulary, the `capabilities.pack` flag, and the `pack` user grant, but wires no host port and exposes no guest binding, so a dispatch fails with `E_USAGE: pack.write is not available in this runtime`. Capsule building is CLI-only (`capsule pack`).
+- **Scope:** Implement the host-side port so a granted capsule can build and sign a capsule from a directory, returning `{ file, capsuleId, bytes }`, with the written path confined to the invoking host's working directory.
+- **Acceptance Criteria:** A capsule declaring `pack.write` produces a capsule that passes `capsule verify`, and the effect records and replays through the hash-chained journal like every other port.
 
 ---
 

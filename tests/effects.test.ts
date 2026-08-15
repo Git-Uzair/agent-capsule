@@ -571,11 +571,16 @@ test("delegates net.fetch and pack.write to the injected ports", async () => {
       capsuleError("E_POLICY", /^host evil\.com is not in capabilities\.net\.allowed_hosts$/),
     );
 
-    // A port that was never wired is a usage error, not a silent success.
+    // A port that was never wired is a usage error, not a silent success. `pack.write` is the one the
+    // host never wires in v0.1, which is what the spec's effect table says about it.
     const bare = effects({ mode: "record", manifest, grants });
     await assert.rejects(
       () => bare.controller.dispatch("greet", "net.fetch", { url: "https://api.example.com/v1" }),
       capsuleError("E_USAGE", /^net\.fetch is not available in this runtime$/),
+    );
+    await assert.rejects(
+      () => bare.controller.dispatch("greet", "pack.write", { dir: "src" }),
+      capsuleError("E_USAGE", /^pack\.write is not available in this runtime$/),
     );
   });
 });

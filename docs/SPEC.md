@@ -252,34 +252,34 @@ Provenance in Agent Capsule is established via in-toto-inspired attestation stat
 
 ### 3.1 Statement Document (`.capsule/statement.json`)
 
-The statement document binds the capsule identity, individual payload file digests, builder metadata, and the tool catalog digest:
+The statement document binds the capsule identity, individual payload file digests, builder metadata, and the tool catalog digest. The example below is pretty-printed for readability; the stored `.capsule/statement.json` entry is the RFC 8785 canonical serialization of the same document (member names sorted, no insignificant whitespace), because it is the exact byte string the signature covers:
 
 ```json
 {
   "spec": "agentcapsule.org/statement/0.1",
   "subject": {
-    "name": "my-tool",
+    "name": "hello",
     "version": "1.0.0",
-    "payloadDigest": "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
+    "payloadDigest": "sha256:75b58a147c31a511e182580c6a55ab760ae004bdb95295e027549b96dd80ce08"
   },
   "files": [
-    { "path": "capsule.json", "sha256": "sha256:...", "size": 1240 },
-    { "path": "src/main.js", "sha256": "sha256:...", "size": 3412 },
-    { "path": "ui/index.html", "sha256": "sha256:...", "size": 5120 }
+    { "path": "capsule.json", "sha256": "3d189765dca0123d84ce88f108e61f92c626d0a49dde5bec7c175b33bb46d88d", "size": 840 },
+    { "path": "src/main.js", "sha256": "d771292557fc08d96fac4e713051bdd4daaeeedbaa8c84bdccf4715336eb01a0", "size": 277 },
+    { "path": "ui/index.html", "sha256": "8587291328cf46bf3e1e7d6284d8f132fd825dcc3fc083d4da442545eab4da43", "size": 661 }
   ],
   "predicate": {
     "builder": {
       "name": "agent-capsule",
       "version": "0.1.0"
     },
-    "toolCatalogDigest": "sha256:c06f8ff2ada78badb1f22c23fc07ada1b59e36b01397558899e03f366c3b8057"
+    "toolCatalogDigest": "sha256:49e4912382cfbf165b334b08f8af711ea33b0a93e6690c6494645a75c36e9bd8"
   }
 }
 ```
 
 1. **Specification Identifier (`spec`):** MUST be `"agentcapsule.org/statement/0.1"`.
 2. **Subject (`subject`):** Binds the capsule `name`, `version`, and `payloadDigest`.
-3. **Files Array (`files`):** Contains all archive entries excluding `.capsule/statement.json` and `.capsule/signature.json`, sorted by `path` in UTF-8 code unit order. Each entry specifies `path`, `sha256` (hex-encoded SHA-256 with `sha256:` prefix), and uncompressed `size` in bytes.
+3. **Files Array (`files`):** Contains all archive entries excluding `.capsule/statement.json` and `.capsule/signature.json`, sorted by `path` in UTF-8 code unit order. Each entry specifies `path`, `sha256`, and uncompressed `size` in bytes. `sha256` is the SHA-256 digest of the entry's uncompressed bytes as a **bare 64-character lowercase hexadecimal string with no `sha256:` prefix**; the `sha256:` prefix appears only on the `digestOf`-derived values `payloadDigest` and `toolCatalogDigest`.
 4. **Payload Digest (`payloadDigest`):** The `digestOf` calculation (`sha256:` + hex hash of RFC 8785 canonical JSON) of the `files` array.
 5. **Predicate (`predicate`):** Contains `builder` (`{ name, version }`) and `toolCatalogDigest`.
 6. **Tool Catalog Digest (`toolCatalogDigest`):** The `digestOf` calculation of normalized tool declarations from `capsule.json` (sorted by tool name).
@@ -367,13 +367,13 @@ All operations that read the outside world, persist state, or perform side effec
 | :--- | :--- | :--- | :--- |
 | `clock.now` | `{}` | ISO-8601 UTC timestamp string | Derived from host or replay journal. |
 | `random.bytes` | `{ n: integer }` | Hexadecimal string | `1 <= n <= 64`. |
-| `kv.get` | `{ key: string }` | `string` or `null` | Key length `<= 256` bytes. Requires `capabilities.kv = true`. |
-| `kv.set` | `{ key: string, value: string }` | `true` | Key `<= 256` bytes, value `<= 64` KiB, total table `<= 10,000` rows. Requires `capabilities.kv = true`. |
+| `kv.get` | `{ key: string }` | `string` or `null` | Key `<= 256` characters (UTF-16 code units). Requires `capabilities.kv = true`. |
+| `kv.set` | `{ key: string, value: string }` | `true` | Key `<= 256` characters (UTF-16 code units), value `<= 64` KiB (65,536 UTF-8 bytes), total table `<= 10,000` rows. Requires `capabilities.kv = true`. |
 | `sql.query` | `{ sql: string, params?: array }` | Array of row objects | Read-only connection. Max 1,000 rows, max 1 MiB serialized JSON. Requires `capabilities.sql = true`. |
 | `sql.exec` | `{ sql: string, params?: array }` | `{ changes: integer }` | Read-write connection. Tokenized keyword checks forbid `ATTACH`, `PRAGMA`, and `VACUUM`. Requires `capabilities.sql = true`. |
 | `log.write` | `{ message: string }` | `true` | Message `<= 2` KiB. Stripped of ANSI escapes and control characters, written strictly to host `stderr`. |
 | `net.fetch` | `{ url: string, init?: object }` | `{ status, statusText, headers, body }` | HTTPS only (or HTTP on localhost). Host allowlist validation. SSRF protection (rejects RFC 1918 / link-local / cloud metadata IPs). Request `<= 1` MiB, response `<= 4` MiB, max 5 redirects. |
-| `pack.write` | `{ dir: string, out?: string }` | `{ file, capsuleId, bytes }` | Directory packing into `.capsule`. Requires `capabilities.pack = true`. |
+| `pack.write` | `{ dir: string, out?: string }` | `{ file, capsuleId, bytes }` | **Schema-declared only in v0.1.** The effect name is part of the manifest schema and the effect vocabulary, and it is policy-gated by `capabilities.pack = true` plus the `pack` user grant, but no host port is wired and the determinism prelude (§4.3) exposes no guest binding for it: a dispatch of `pack.write` fails with `E_USAGE: pack.write is not available in this runtime`. Host implementation is targeted for v0.2; `capsule pack` is the v0.1 way to build a capsule. |
 
 ### 5.1 State Isolation
 
@@ -595,7 +595,7 @@ This specification deliberately diverges from the exploratory proposal (`docs/ag
 | **Non-Determinism** | Unrestricted host functions | Quarantined Effect Ports & Hash-Chained Journal | Durable execution pattern enables mathematical proof of replayability, audit trails, and regression verification. |
 | **Protocol Version** | MCP 2024 draft with server-initiated elicitation | MCP `2026-07-28` stateless profile with MRTR | Modern MCP standardizes stateless servers, `_meta` request state, result types, and Model-Requested Tool Routing. |
 | **Security Scope** | Sandbox boundaries only | Multi-layer: Signatures, TOFU, catalog drift detection, injection filtering | Real-world MCP security research demonstrates tool-poisoning, prompt injection, and silent catalog mutation (rug pulls) are primary threat vectors. |
-| **Quine Builder** | Embedded compiler toolchain in every file | Host-provided `pack.write` effect and `capsule pack` tool | Eliminates bloated duplicated toolchains inside every package while preserving the ability for any capsule to produce capsules. |
+| **Quine Builder** | Embedded compiler toolchain in every file | `capsule pack` command, plus a schema-declared `pack.write` effect awaiting its v0.2 host port (§5) | Eliminates bloated duplicated toolchains inside every package while preserving the ability for any capsule to produce capsules. |
 
 ---
 
