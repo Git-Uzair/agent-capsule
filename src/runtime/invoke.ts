@@ -104,9 +104,11 @@ function sanitizeValue(value: unknown): unknown {
  * refusal at that stage journals nothing and executes nothing; there is no half-run to explain.
  *
  * Past that point the run is a matter of record: it is opened in the journal, every effect the guest
- * asks for is appended as it happens, and the outcome — value or error — closes the chain. Nothing
- * throws out of here. A caller gets an `InvokeResult` either way, because "the tool failed" is an
- * answer a model and a CLI both have to be able to read.
+ * asks for is appended as it happens, and the outcome — value or error — closes the chain. Opening it
+ * is itself a refusal point: a run id already in the journal is the caller's mistake, and the run
+ * holding that id is left exactly as it was. Nothing throws out of here. A caller gets an
+ * `InvokeResult` either way, because "the tool failed" is an answer a model and a CLI both have to be
+ * able to read.
  */
 export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
   const startedAt = performance.now();
@@ -155,6 +157,9 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
   const journal = openJournal(opts.journalPath ?? paths.journal);
   let state: CapsuleState | undefined;
   let effects: EffectsController | undefined;
+  // Whether this call owns a run in the journal. A run id it did not open is a run it must not write
+  // to, close, or count — the id may already name someone else's finished run.
+  let started = false;
 
   /**
    * The journal is the run's evidence, so it is the last thing consulted: a chain that does not
@@ -185,7 +190,19 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
   try {
     state = openState(opts.statePath ?? paths.app);
     const argsDigest = digestOf(args);
-    journal.beginRun({ runId, capsuleId: capsule.capsuleId, tool: tool.name, mode });
+    // The run id is the journal's primary key, so the insert is the existence check: a caller that
+    // reuses an id is refused here, before anything is written or executed, and told so in its own
+    // vocabulary rather than SQLite's.
+    try {
+      journal.beginRun({ runId, capsuleId: capsule.capsuleId, tool: tool.name, mode });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      if (message.includes("UNIQUE constraint failed: capsule_runs.run_id")) {
+        throw new CapsuleError("E_USAGE", `runId already exists: ${runId}`, { runId });
+      }
+      throw e;
+    }
+    started = true;
     journal.append(runId, EVENT.runStarted, { capsuleId: capsule.capsuleId, tool: tool.name, mode, argsDigest });
     // The digest, not the arguments: a journal is a file on disk that outlives the run, and a tool's
     // arguments are the user's data. Recording them is opt-in, for the replays that need them.
@@ -237,9 +254,12 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     return settle(true, value);
   } catch (e) {
     const error = errorOf(e);
-    // A run that failed is still a run that happened, so the failure is journalled too — but the
+    // A run that failed is still a run that happened, so the failure is journalled too — but only if
+    // this call is the one that opened it. Before that point there is no run to end: writing an
+    // ending anyway would append to whatever run already holds the id and mark it failed. And the
     // journal is not allowed to replace the error: if writing the ending fails, the caller still
     // hears why the tool did.
+    if (!started) return refused(error);
     try {
       journal.append(runId, EVENT.toolCompleted, { tool: tool.name, error });
       journal.append(runId, EVENT.runFinished, { status: "error", code: error.code });

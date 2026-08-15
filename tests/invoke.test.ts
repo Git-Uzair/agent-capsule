@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { loadCapsule, packDirectory, type LoadedCapsule } from "../src/format/capsule.ts";
 import { EVENT, openJournal } from "../src/runtime/journal.ts";
 import { invokeTool, sidecarPaths, type InvokeResult } from "../src/runtime/invoke.ts";
@@ -76,6 +77,23 @@ function eventTypes(journalPath: string, runId: string): string[] {
     return journal.events(runId).map((e) => e.type);
   } finally {
     journal.close();
+  }
+}
+
+/**
+ * The run's own row, not its events: `finishRun` writes the status there, so a run that a later call
+ * quietly failed reads as `error` here while its event chain still verifies. Raw SQL because the
+ * journal deliberately has no status getter.
+ */
+function runStatus(journalPath: string, runId: string): string | undefined {
+  const db = new DatabaseSync(journalPath);
+  try {
+    const row = db.prepare("SELECT status FROM capsule_runs WHERE run_id = ?").get(runId) as
+      | { status: string }
+      | undefined;
+    return row?.status;
+  } finally {
+    db.close();
   }
 }
 
@@ -328,6 +346,47 @@ test("a guest throw is reported as E_GUEST and the run is journalled as an error
     } finally {
       journal.close();
     }
+  });
+});
+
+test("a duplicate runId is refused and the run already under that id is left alone", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const journalPath = join(home, "dup.sqlite");
+    const runId = "run_abc";
+    const call = { capsule, tool: "greet", args: { name: "ada" }, runId, journalPath, clock: () => AT };
+    const first = await invokeTool(call);
+
+    assert.equal(first.ok, true);
+    assert.equal(first.runId, runId);
+    assert.equal(first.events, 13);
+
+    const second = await invokeTool(call);
+
+    // A run that never started is the caller's mistake, not the guest's, and records nothing.
+    assert.equal(second.ok, false);
+    assert.equal(second.error?.code, "E_USAGE");
+    assert.match(second.error?.message ?? "", /runId already exists: run_abc/);
+    assert.equal(second.events, 0);
+    assert.equal(second.effects, 0);
+
+    // The first run is exactly as it was left: same events, still ok, chain still verifies.
+    assert.deepEqual(eventTypes(journalPath, runId), [
+      EVENT.runStarted,
+      EVENT.toolProposed,
+      EVENT.toolAuthorized,
+      EVENT.effectRequested,
+      EVENT.effectCompleted,
+      EVENT.effectRequested,
+      EVENT.effectCompleted,
+      EVENT.effectRequested,
+      EVENT.effectCompleted,
+      EVENT.effectRequested,
+      EVENT.effectCompleted,
+      EVENT.toolCompleted,
+      EVENT.runFinished,
+    ]);
+    assert.equal(runStatus(journalPath, runId), "ok");
   });
 });
 
