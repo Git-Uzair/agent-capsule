@@ -230,6 +230,7 @@ export async function handleToolsCall(
     statePath: ctx.statePath,
     journalPath: ctx.journalPath,
     homeDir: ctx.homeDir,
+    traceparent: meta?.traceparent,
   });
 
   if (res.ok) {

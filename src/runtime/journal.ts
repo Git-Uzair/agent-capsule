@@ -54,6 +54,14 @@ export type Journal = {
   }): void;
   append(runId: string, type: string, payload: unknown): { idx: number; hash: string };
   finishRun(runId: string, status: "ok" | "error"): void;
+  run(runId: string): {
+    run_id: string;
+    capsule_id: string;
+    tool: string;
+    mode: string;
+    status: string;
+    started_at: string;
+  } | null;
   events(runId: string): JournalEvent[];
   effects(runId: string): RecordedEffect[];
   verifyChain(runId: string): void;
@@ -119,7 +127,7 @@ export function openJournal(path: string): Journal {
   // schema or one of the statements compiled against it, and by then the handle is open. Everything
   // that can fail while it is open sits inside this one `try`, so the handle is closed rather than left
   // holding a lock on a file the caller is about to be told is unusable.
-  const { insertRun, updateStatus, selectLast, insertEvent, selectEvents, selectLatest, selectRuns } = (() => {
+  const { insertRun, updateStatus, selectLast, insertEvent, selectEvents, selectRun, selectLatest, selectRuns } = (() => {
     try {
       db.exec(SCHEMA);
       return {
@@ -134,6 +142,9 @@ export function openJournal(path: string): Journal {
         ),
         selectEvents: db.prepare(
           "SELECT idx, type, payload, prev_hash, hash FROM capsule_events WHERE run_id = ? ORDER BY idx ASC",
+        ),
+        selectRun: db.prepare(
+          "SELECT run_id, capsule_id, tool, mode, status, started_at FROM capsule_runs WHERE run_id = ?",
         ),
         // `latestRunId()` with no capsule means "any capsule", expressed as a single statement so the
         // ordering rule lives in exactly one place. Insertion order breaks ties on equal timestamps.
@@ -184,6 +195,20 @@ export function openJournal(path: string): Journal {
 
     finishRun(runId, status) {
       updateStatus.run(status, runId);
+    },
+
+    run(runId: string) {
+      const row = selectRun.get(runId) as
+        | {
+            run_id: string;
+            capsule_id: string;
+            tool: string;
+            mode: string;
+            status: string;
+            started_at: string;
+          }
+        | undefined;
+      return row ?? null;
     },
 
     events,

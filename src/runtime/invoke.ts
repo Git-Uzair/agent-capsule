@@ -12,6 +12,7 @@ import { runGuest } from "./guest.ts";
 import { EVENT, openJournal, type Journal } from "./journal.ts";
 import { buildPolicy, type Policy } from "./policy.ts";
 import { openState, type CapsuleState } from "./state.ts";
+import { writeTrace } from "../telemetry/otlp.ts";
 
 /** How much of any one string a caller — ultimately a model's context — is given. */
 const MAX_VALUE_CHARS = 8192;
@@ -36,6 +37,7 @@ export type InvokeOptions = {
   args?: unknown;
   mode?: "record";
   runId?: string;
+  traceparent?: string;
   grants?: Record<string, boolean> | GrantsStore;
   statePath?: string;
   journalPath?: string;
@@ -283,6 +285,19 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
     journal.append(runId, EVENT.toolCompleted, { tool: tool.name, valueDigest: digestOf(value) });
     journal.append(runId, EVENT.runFinished, { status: "ok" });
     journal.finishRun(runId, "ok");
+    if (process.env.CAPSULE_TRACE_DIR) {
+      try {
+        writeTrace({
+          journal,
+          runId,
+          traceparent: opts.traceparent,
+          capsuleName: capsule.manifest.meta.name,
+          capsuleVersion: capsule.manifest.meta.version,
+        });
+      } catch {
+        /* file exporter failure does not fail the tool invocation */
+      }
+    }
     return settle(true, value);
   } catch (e) {
     const error = errorOf(e);
@@ -298,6 +313,19 @@ export async function invokeTool(opts: InvokeOptions): Promise<InvokeResult> {
       journal?.append(runId, EVENT.toolCompleted, { tool: tool.name, error });
       journal?.append(runId, EVENT.runFinished, { status: "error", code: error.code });
       journal?.finishRun(runId, "error");
+      if (journal && process.env.CAPSULE_TRACE_DIR) {
+        try {
+          writeTrace({
+            journal,
+            runId,
+            traceparent: opts.traceparent,
+            capsuleName: capsule.manifest.meta.name,
+            capsuleVersion: capsule.manifest.meta.version,
+          });
+        } catch {
+          /* file exporter failure does not fail the tool invocation */
+        }
+      }
     } catch {
       /* the chain check in settle() is what reports a journal that could not be closed properly */
     }
