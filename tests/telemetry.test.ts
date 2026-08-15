@@ -146,25 +146,77 @@ test("CAPSULE_TRACE_DIR file exporter writes valid OTLP JSON trace file on finis
       const scopeSpan = rs.scopeSpans[0]!;
       assert.equal(scopeSpan.scope.name, "agent-capsule");
 
+      // greet performs exactly four effects (kv.get, kv.set, log.write, clock.now), so the export is
+      // pinned to one root span plus four children: an extra or missing span is a regression.
       const spans = scopeSpan.spans;
-      assert.ok(spans.length >= 5);
+      assert.equal(spans.length, 5);
 
       const rootSpan = spans[0]!;
       assert.equal(rootSpan.name, "execute_tool greet");
       assert.equal(rootSpan.kind, SPAN_KIND.INTERNAL);
       assert.equal(rootSpan.status.code, SPAN_STATUS.OK);
       assert.equal(rootSpan.status.code, 0);
+      assert.equal(rootSpan.parentSpanId, undefined);
+      assert.equal(spans.filter((s: OTelSpan) => s.name === "execute_tool greet").length, 1);
 
       const childSpans = spans.slice(1);
+      assert.equal(childSpans.length, 4);
       for (const child of childSpans) {
+        assert.ok(child.name.startsWith("capsule.effect "), `unexpected child span name: ${child.name}`);
         assert.equal(child.traceId, rootSpan.traceId);
         assert.equal(child.parentSpanId, rootSpan.spanId);
         assert.equal(child.status.code, SPAN_STATUS.OK);
         assert.equal(child.kind, SPAN_KIND.INTERNAL);
       }
+      assert.deepEqual(
+        childSpans
+          .map((s: OTelSpan) => s.attributes.find((a: { key: string }) => a.key === ATTR.CAPSULE_EFFECT_OP)?.value.stringValue)
+          .sort(),
+        ["clock.now", "kv.get", "kv.set", "log.write"],
+      );
     } finally {
       if (prevTraceDir === undefined) delete process.env.CAPSULE_TRACE_DIR;
       else process.env.CAPSULE_TRACE_DIR = prevTraceDir;
+    }
+  });
+});
+
+test("tracing is disabled by default when CAPSULE_TRACE_DIR is unset and no trace file or directory is written", async () => {
+  await withHome(async (home) => {
+    const prevTraceDir = process.env.CAPSULE_TRACE_DIR;
+    delete process.env.CAPSULE_TRACE_DIR;
+
+    try {
+      const capsule = await packFixture(home);
+      const paths = sidecarPaths(capsule.file);
+      const runId = randomUUID();
+
+      const res = await invokeTool({
+        capsule,
+        tool: "greet",
+        args: { name: "ada" },
+        runId,
+        journalPath: paths.journal,
+        statePath: paths.app,
+      });
+      assert.equal(res.ok, true);
+
+      const entries = readdirSync(home, { recursive: true }) as string[];
+      const traceArtifacts = entries.filter(
+        (entry) => entry.endsWith(".otlp.json") || entry.split(/[\\/]/).includes("traces"),
+      );
+      assert.deepEqual(traceArtifacts, [], `no trace artifacts expected, found: ${traceArtifacts.join(", ")}`);
+
+      // The exporter itself also stays silent without a directory, rather than picking a default.
+      const journal = openJournal(paths.journal);
+      try {
+        assert.equal(writeTrace({ journal, runId }), undefined);
+      } finally {
+        journal.close();
+      }
+      assert.equal(existsSync(join(home, "traces")), false);
+    } finally {
+      if (prevTraceDir !== undefined) process.env.CAPSULE_TRACE_DIR = prevTraceDir;
     }
   });
 });

@@ -98,10 +98,11 @@ test("exportTrace builds valid OTelTraceExport with resourceSpans, root, and eff
 
       const spans = scopeSpan.spans;
       // greet has clock.now, kv.get, kv.set, log.write = 4 effects + 1 root span = 5 spans
-      assert.ok(spans.length >= 2, `expected at least 2 spans, got ${spans.length}`);
+      assert.equal(spans.length, 5);
 
       const rootSpan = spans[0]!;
       assert.equal(rootSpan.name, "execute_tool greet");
+      assert.equal(spans.filter((s: OTelSpan) => s.name === "execute_tool greet").length, 1);
       assert.equal(rootSpan.kind, 1);
       assert.equal(rootSpan.parentSpanId, undefined);
       assert.equal(rootSpan.status.code, 0);
@@ -111,6 +112,7 @@ test("exportTrace builds valid OTelTraceExport with resourceSpans, root, and eff
       assert.ok(BigInt(rootSpan.endTimeUnixNano) >= BigInt(rootSpan.startTimeUnixNano));
 
       const childSpans = spans.slice(1);
+      assert.equal(childSpans.length, 4);
       for (const child of childSpans) {
         assert.equal(child.traceId, rootSpan.traceId);
         assert.equal(child.parentSpanId, rootSpan.spanId);
@@ -125,10 +127,7 @@ test("exportTrace builds valid OTelTraceExport with resourceSpans, root, and eff
         const attr = s.attributes.find((a: { key: string }) => a.key === "capsule.effect.op");
         return attr?.value.stringValue;
       });
-      assert.ok(effectOps.includes("clock.now"));
-      assert.ok(effectOps.includes("kv.get"));
-      assert.ok(effectOps.includes("kv.set"));
-      assert.ok(effectOps.includes("log.write"));
+      assert.deepEqual([...effectOps].sort(), ["clock.now", "kv.get", "kv.set", "log.write"]);
     } finally {
       journal.close();
     }
