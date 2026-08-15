@@ -145,6 +145,11 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
       const i = fields(e.payload).i;
       return typeof i === "number" ? Math.max(max, i) : max;
     }, -1);
+    // How many effects the recording holds, which is not how many it *answered*: the ordinals are
+    // dense, so one past the highest request is the count, and a trailing failure is one of them. The
+    // completions are still the floor, because a journal is a file and a hand-edited one can hold a
+    // completion above its own last request.
+    const expectedEffects = Math.max(recorded.length, maxRequestedOrdinal + 1);
     // State is opened for one reason: an effect the recording shows failing is re-run inside a
     // savepoint that is rolled back, and that needs the database it would have written to. Nothing
     // else in a replay touches it.
@@ -224,12 +229,15 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
     // that threw, a policy that no longer allows the effect, a timeout.
     if (failure !== undefined) return result(failure);
     // A guest can also diverge by asking *less*: stopping early leaves recorded effects unclaimed,
-    // and an effect whose answer was never used is one whose absence the value would not show.
-    if (effects.count() < recorded.length) {
+    // and an effect whose answer was never used is one whose absence the value would not show. The
+    // count to fall short of is every effect the recording asked for, including the one it asked for
+    // last and never got an answer to — a replay that stops in front of that one has not reproduced
+    // the failure, it has avoided it.
+    if (effects.count() < expectedEffects) {
       return result(
         {
           code: "E_NONDETERMINISM",
-          message: `the replay stopped after ${effects.count()} of ${recorded.length} recorded effects`,
+          message: `the replay stopped after ${effects.count()} of ${expectedEffects} recorded effects`,
         },
         true,
       );

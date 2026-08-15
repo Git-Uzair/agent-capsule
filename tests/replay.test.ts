@@ -407,6 +407,35 @@ test("replays a recording whose last effect failed", async () => {
   });
 });
 
+test("reports a divergence when the guest stops before a recording's trailing failed effect", async () => {
+  await withHome(async (home) => {
+    const capsule = await packFixture(home);
+    const paths = sidecarPaths(capsule.file);
+    const recorded = await record(capsule, "ada");
+    // A fifth effect that was asked for and failed: a request with nothing behind it. The guest that
+    // runs now asks for four, and every one of them matches the recording and yields the recorded
+    // value — so the completions agree, the digest agrees, and the effect that was never asked for is
+    // visible only in the count of requests being one higher than the count of answers.
+    const failed = { i: 4, op: "kv.get", paramsDigest: digestOf({ key: 7 }) };
+    const forged = forgeRun(
+      paths.journal,
+      capsule.capsuleId,
+      eventsOf(paths.journal, recorded.runId).flatMap((event) =>
+        event.type === EVENT.toolCompleted ? [{ type: EVENT.effectRequested, payload: failed }, event] : [event],
+      ),
+    );
+
+    const replay = await replayRun({ capsule, runId: forged, journalPath: paths.journal, homeDir: home });
+
+    assert.equal(replay.ok, false);
+    assert.equal(replay.diverged, true);
+    assert.equal(replay.error?.code, "E_NONDETERMINISM");
+    assert.match(replay.error?.message ?? "", /stopped after 4 of 5 recorded effects/);
+    assert.equal(replay.effects, 4);
+    assert.deepEqual(replay.value, recorded.value);
+  });
+});
+
 test("refuses a run whose arguments were not journalled", async () => {
   await withHome(async (home) => {
     const capsule = await packFixture(home);
