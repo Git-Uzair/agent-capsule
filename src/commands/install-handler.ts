@@ -25,7 +25,7 @@ export function buildRegCommands(opts?: {
 
   return [
     ["add", "HKCU\\Software\\Classes\\.capsule", "/ve", "/d", "AgentCapsule.File", "/f"],
-    ["add", "HKCU\\Software\\Classes\\AgentCapsule.File", "/ve", "/d", "Agent Capsule", "/f"],
+    ["add", "HKCU\\Software\\Classes\\AgentCapsule.File", "/v", "FriendlyTypeName", "/d", "Agent Capsule", "/f"],
     [
       "add",
       "HKCU\\Software\\Classes\\AgentCapsule.File\\shell\\open\\command",

@@ -2175,9 +2175,10 @@ report type.
 
 ## Task 25 — Interop and installation: Agent Plugins export, MCP config injection, `.capsule` handler
 
-**Status:** In Progress (User override: unlimited verification cycles)
+**Status:** In Progress (Failed Verify Cycles: 2, Escalated to opus-coder)
 **Attempt Ledger:**
 - attempt 1: initial Task 25 implementation -> verifier FAIL (missing export-plugin command, inject missing default dry-run without --yes, command "capsule" instead of "agent-capsule", win32/non-win32 install-handler semantics)
+- attempt 2: implemented export-plugin, fixed inject defaults to dry-run requiring --yes, set command to agent-capsule with type: stdio, win32 reg commands and non-win32 exit 2 -> verifier FAIL (inferred client config path instead of mandatory --client-config, missing Agent Plugins 1.0.0 $schema and SKILL.md YAML frontmatter, FriendlyTypeName flag in reg commands)
 
 **Goal:** meet the 2026 ecosystem where it is, without guessing at anybody's private paths.
 **Difficulty:** EASY

@@ -7,8 +7,18 @@ import type { Manifest } from "../format/manifest.ts";
 
 const USAGE = "usage: capsule export-plugin <file> -o <dir>";
 
+/** Canonical Agent Plugins 1.0.0 manifest schema identifier (spec §5.2). */
+export const PLUGIN_SCHEMA_URL = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+/** Canonical Agent Plugins 1.0.0 MCP configuration schema identifier (spec §7.2.1). */
+export const MCP_SCHEMA_URL = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json";
+
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
+}
+
+/** Plain YAML scalar when unambiguous, otherwise a double-quoted (JSON) scalar. */
+function yamlScalar(value: string): string {
+  return /^[A-Za-z0-9][^\n:#]*$/.test(value) ? value : JSON.stringify(value);
 }
 
 export function generateSkillMarkdown(manifest: Manifest): string {
@@ -47,7 +57,12 @@ export function generateSkillMarkdown(manifest: Manifest): string {
       ? `| Tool | Description | Arguments |\n| --- | --- | --- |\n${toolRows.join("\n")}`
       : "No tools declared.";
 
-  return `# ${meta.title || meta.name}
+  return `---
+name: ${meta.name}
+description: ${yamlScalar(meta.description)}
+---
+
+# ${meta.title || meta.name}
 
 ${meta.description}
 
@@ -79,12 +94,14 @@ export async function exportPlugin(capsulePath: string, outDir: string): Promise
   const absCapsulePath = resolve(capsulePath);
 
   const pluginJson = {
+    $schema: PLUGIN_SCHEMA_URL,
     name: manifest.meta.name,
     description: manifest.meta.description,
     version: manifest.meta.version,
   };
 
   const mcpJson = {
+    $schema: MCP_SCHEMA_URL,
     mcpServers: {
       [name]: {
         type: "stdio",

@@ -1,11 +1,8 @@
 import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { basename, dirname, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { emptyDict } from "../security/store.ts";
-
-export type ClientType = "claude" | "cursor" | "windsurf" | "generic";
 
 export type McpServerConfig = {
   type: "stdio";
@@ -14,40 +11,10 @@ export type McpServerConfig = {
 };
 
 const USAGE =
-  "usage: capsule inject <file> [--client-config <path>] [--config <path>] [--client claude|cursor|windsurf|generic] [--stdout] [--name <serverName>] [--dry-run] [--yes]";
+  "usage: capsule inject <file> (--client-config <path> | --stdout) [--config <path>] [--name <serverName>] [--dry-run] [--yes]";
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
-}
-
-export function defaultClientConfigPath(client: ClientType): string {
-  const home = homedir();
-  const platform = process.platform;
-
-  switch (client) {
-    case "claude": {
-      if (platform === "win32") {
-        const appData = process.env.APPDATA || join(home, "AppData", "Roaming");
-        return join(appData, "Claude", "claude_desktop_config.json");
-      }
-      if (platform === "darwin") {
-        return join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
-      }
-      return join(home, ".config", "Claude", "claude_desktop_config.json");
-    }
-    case "cursor": {
-      return join(home, ".cursor", "mcp.json");
-    }
-    case "windsurf": {
-      return join(home, ".codeium", "windsurf", "mcp_config.json");
-    }
-    case "generic": {
-      return resolve("mcp.json");
-    }
-    default: {
-      throw new CapsuleError("E_USAGE", `unknown client type: ${String(client)}`);
-    }
-  }
 }
 
 export function generateMcpServerConfig(
@@ -108,7 +75,6 @@ export function injectConfig(
 
 export async function runInject(argv: string[]): Promise<number> {
   let file: string | undefined;
-  let client: ClientType | undefined;
   let configPath: string | undefined;
   let serverName: string | undefined;
   let stdoutMode = false;
@@ -120,13 +86,7 @@ export async function runInject(argv: string[]): Promise<number> {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    if (arg === "--client") {
-      const val = valueOf(arg, argv[++i]);
-      if (val !== "claude" && val !== "cursor" && val !== "windsurf" && val !== "generic") {
-        usage(`invalid client: ${val}`);
-      }
-      client = val as ClientType;
-    } else if (arg === "--config" || arg === "--client-config") {
+    if (arg === "--config" || arg === "--client-config") {
       configPath = valueOf(arg, argv[++i]);
     } else if (arg === "--name") {
       serverName = valueOf(arg, argv[++i]);
@@ -149,6 +109,10 @@ export async function runInject(argv: string[]): Promise<number> {
     usage("missing capsule file");
   }
 
+  if (configPath === undefined && !stdoutMode) {
+    throw new CapsuleError("E_USAGE", "inject requires --client-config <path> or --stdout");
+  }
+
   if (!existsSync(file)) {
     throw new CapsuleError("E_USAGE", "capsule file does not exist");
   }
@@ -160,48 +124,39 @@ export async function runInject(argv: string[]): Promise<number> {
   const derivedName = serverName || basename(file, ".capsule");
   const serverConfig = generateMcpServerConfig(file, derivedName);
 
-  const targetConfigPath =
-    configPath !== undefined
-      ? configPath
-      : defaultClientConfigPath(client ?? "claude");
-
   let existingJson = "{}";
   let fileExisted = false;
 
-  if (existsSync(targetConfigPath)) {
+  if (configPath !== undefined && existsSync(configPath)) {
     fileExisted = true;
-    const st = await stat(targetConfigPath);
+    const st = await stat(configPath);
     if (st.isDirectory()) {
       throw new CapsuleError("E_USAGE", "config path is a directory");
     }
     if (st.size > 1024 * 1024) {
       throw new CapsuleError("E_USAGE", "config file exceeds 1 MiB limit");
     }
-    existingJson = await readFile(targetConfigPath, "utf8");
+    existingJson = await readFile(configPath, "utf8");
   }
 
-  const output = injectConfig(
-    stdoutMode && !configPath && !client && !existsSync(targetConfigPath) ? "{}" : existingJson,
-    derivedName,
-    serverConfig,
-  );
+  const output = injectConfig(existingJson, derivedName, serverConfig);
 
-  if (stdoutMode || dryRun || !yes) {
+  if (configPath === undefined || stdoutMode || dryRun || !yes) {
     process.stdout.write(output);
     return 0;
   }
 
   if (fileExisted) {
-    const backupPath = `${targetConfigPath}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-    await copyFile(targetConfigPath, backupPath);
+    const backupPath = `${configPath}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    await copyFile(configPath, backupPath);
   }
 
-  await mkdir(dirname(targetConfigPath), { recursive: true });
-  const tmpPath = `${targetConfigPath}.tmp.${Date.now()}`;
+  await mkdir(dirname(configPath), { recursive: true });
+  const tmpPath = `${configPath}.tmp.${Date.now()}`;
   await writeFile(tmpPath, output, "utf8");
-  await rename(tmpPath, targetConfigPath);
+  await rename(tmpPath, configPath);
 
-  process.stderr.write(`injected "${derivedName}" into ${targetConfigPath}\n`);
+  process.stderr.write(`injected "${derivedName}" into ${configPath}\n`);
   return 0;
 }
 

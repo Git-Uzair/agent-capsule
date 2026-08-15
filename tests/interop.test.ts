@@ -4,13 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import {
-  type ClientType,
-  defaultClientConfigPath,
-  generateMcpServerConfig,
-  injectConfig,
-  runInject,
-} from "../src/commands/inject.ts";
+import { generateMcpServerConfig, injectConfig, runInject } from "../src/commands/inject.ts";
 import {
   buildRegCommands,
   generateLinuxDesktopFile,
@@ -18,7 +12,12 @@ import {
   generateMacPlist,
   runInstallHandler,
 } from "../src/commands/install-handler.ts";
-import { exportPlugin, runExportPlugin } from "../src/commands/export-plugin.ts";
+import {
+  MCP_SCHEMA_URL,
+  PLUGIN_SCHEMA_URL,
+  exportPlugin,
+  runExportPlugin,
+} from "../src/commands/export-plugin.ts";
 import { packDirectory } from "../src/format/capsule.ts";
 import { CapsuleError } from "../src/core/errors.ts";
 
@@ -44,8 +43,10 @@ test("export-plugin creates plugin.json, mcp.json, and skills/<name>/SKILL.md wi
 
     const pluginJsonPath = join(pluginDir, "plugin.json");
     assert.ok(existsSync(pluginJsonPath));
+    assert.equal(PLUGIN_SCHEMA_URL, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
     const pluginJson = JSON.parse(readFileSync(pluginJsonPath, "utf8"));
     assert.deepEqual(pluginJson, {
+      $schema: PLUGIN_SCHEMA_URL,
       name: "hello",
       description: "Reference capsule used by the agent-capsule test suite.",
       version: "1.0.0",
@@ -53,8 +54,10 @@ test("export-plugin creates plugin.json, mcp.json, and skills/<name>/SKILL.md wi
 
     const mcpJsonPath = join(pluginDir, "mcp.json");
     assert.ok(existsSync(mcpJsonPath));
+    assert.equal(MCP_SCHEMA_URL, "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json");
     const mcpJson = JSON.parse(readFileSync(mcpJsonPath, "utf8"));
     assert.deepEqual(mcpJson, {
+      $schema: MCP_SCHEMA_URL,
       mcpServers: {
         hello: {
           type: "stdio",
@@ -68,6 +71,12 @@ test("export-plugin creates plugin.json, mcp.json, and skills/<name>/SKILL.md wi
     assert.ok(existsSync(skillPath));
     const skillContent = readFileSync(skillPath, "utf8");
 
+    assert.ok(
+      skillContent.startsWith(
+        "---\nname: hello\ndescription: Reference capsule used by the agent-capsule test suite.\n---\n",
+      ),
+      `SKILL.md must start with YAML frontmatter, got: ${skillContent.slice(0, 120)}`,
+    );
     assert.ok(skillContent.includes("Hello Capsule"));
     assert.ok(skillContent.includes("Reference capsule used by the agent-capsule test suite."));
     assert.ok(skillContent.includes("This capsule is sandboxed; its declared capabilities are"));
@@ -88,25 +97,19 @@ test("export-plugin throws E_USAGE on missing capsule file", async () => {
   });
 });
 
-test("defaultClientConfigPath returns expected path for each client", () => {
-  const claudePath = defaultClientConfigPath("claude");
-  assert.ok(claudePath.endsWith("claude_desktop_config.json"));
+test("runInject requires --client-config or --stdout and never infers a host path", async () => {
+  await withTempDir(async (dir) => {
+    const capsuleFile = join(dir, "tool.capsule");
+    writeFileSync(capsuleFile, "dummy");
 
-  const cursorPath = defaultClientConfigPath("cursor");
-  assert.ok(cursorPath.includes(".cursor"));
-  assert.ok(cursorPath.endsWith("mcp.json"));
-
-  const windsurfPath = defaultClientConfigPath("windsurf");
-  assert.ok(windsurfPath.includes("windsurf"));
-  assert.ok(windsurfPath.endsWith("mcp_config.json"));
-
-  const genericPath = defaultClientConfigPath("generic");
-  assert.ok(genericPath.endsWith("mcp.json"));
-
-  assert.throws(
-    () => defaultClientConfigPath("unknown" as ClientType),
-    (e: unknown) => e instanceof CapsuleError && e.code === "E_USAGE",
-  );
+    await assert.rejects(
+      () => runInject([capsuleFile]),
+      (e: unknown) =>
+        e instanceof CapsuleError &&
+        e.code === "E_USAGE" &&
+        e.message === "inject requires --client-config <path> or --stdout",
+    );
+  });
 });
 
 test("generateMcpServerConfig resolves absolute capsule path", () => {
@@ -320,7 +323,8 @@ test("buildRegCommands returns expected argv arrays for install and uninstall", 
   assert.deepEqual(installCmds[1], [
     "add",
     "HKCU\\Software\\Classes\\AgentCapsule.File",
-    "/ve",
+    "/v",
+    "FriendlyTypeName",
     "/d",
     "Agent Capsule",
     "/f",
