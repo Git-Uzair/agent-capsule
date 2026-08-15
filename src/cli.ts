@@ -2,6 +2,8 @@
 import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { conformanceCommand } from "./commands/conformance.ts";
+import { injectCommand } from "./commands/inject.ts";
+import { installHandlerCommand } from "./commands/install-handler.ts";
 import { mcpCommand } from "./commands/mcp.ts";
 import { packCommand } from "./commands/pack.ts";
 import { replayCommand } from "./commands/replay.ts";
@@ -19,6 +21,8 @@ const COMMANDS = new Map<string, Command>([
   ["mcp", mcpCommand],
   ["ui", uiCommand],
   ["conformance", conformanceCommand],
+  ["inject", injectCommand],
+  ["install-handler", installHandlerCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]

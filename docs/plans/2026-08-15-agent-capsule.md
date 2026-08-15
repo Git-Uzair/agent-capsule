@@ -1971,6 +1971,8 @@ both fail; `capsule_query("DELETE FROM kv")` fails; `capsule_journal` never cont
 
 ## Task 21 — MCP Apps: serve the capsule UI inside the agent host
 
+**Status:** Completed (PASS)
+
 **Goal:** the "human GUI" without a local server — the capsule's HTML renders in Claude/Cursor
 as a sandboxed iframe.
 **Difficulty:** EASY · *parallelizable with task 20*
@@ -2007,6 +2009,12 @@ tool in `tools/list` carries `_meta.ui.resourceUri === "ui://hello"`.
 # PHASE 3 — Human mode, observability, conformance, distribution (tasks 22–26)
 
 ## Task 22 — Loopback UI server and `capsule ui`
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 22 implementation -> verifier FAIL (Host header validation on port 80 rejected default port without :80)
+- attempt 2: uncommitted attempt -> verifier FAIL (Host header on port 80 still rejecting port-less 127.0.0.1 and localhost)
+- attempt 3 (opus-coder): allowedHosts(port) helper accepting 127.0.0.1 and localhost on port 80 with covering tests -> verifier PASS
 
 **Goal:** "Bob opens it and it just works", without giving the page any authority.
 **Difficulty:** HARD (this is the one component reachable by a browser; get the headers right)
@@ -2063,6 +2071,14 @@ renders the fixture page in a real browser (manual check, note it in the commit 
 
 ## Task 23 — OpenTelemetry-shaped trace export (file exporter)
 
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 23 implementation -> verifier FAIL (child span kind for net.fetch, all-zero traceparent check, direct run started_at query in journal, {resourceSpans:[...]} wrapper, semconv module, CAPSULE_TRACE_DIR file exporter)
+- attempt 2: standard {resourceSpans:[...]} OTLP shape, SPAN_KIND_CLIENT (3) for net.fetch, all-zero traceparent rejection, ATTR semconv module, journal.run(runId) query, and CAPSULE_TRACE_DIR file exporter -> verifier FAIL (BigInt RangeError on non-integer ms, duplicate spanId when effects share ordinal i)
+- attempt 3: safe integer duration rounding and unique child spanIds derived from array index -> verifier FAIL (root span status code 0 for success, mcp.method.name/mcp.tool.name attributes for MCP calls, deleted trace.ts shim)
+- attempt 4: SPAN_STATUS.OK = 0, mcp.method.name/mcp.tool.name wired into invokeTool/writeTrace, deleted src/runtime/trace.ts shim -> verifier FAIL (tighten test assertions in telemetry.test.ts for exact 1 root + 4 child spans and unset CAPSULE_TRACE_DIR no-write check)
+- attempt 5 (opus-coder): tightened test assertions in telemetry.test.ts/trace.test.ts for exact 1 root + 4 child spans, verified no-write when CAPSULE_TRACE_DIR is unset -> verifier PASS
+
 **Goal:** standard-shaped observability with zero new dependencies and no dependence on a
 convention that is still `Development`.
 **Difficulty:** EASY
@@ -2105,6 +2121,11 @@ finds nothing (assert programmatically by reading the source files).
 ---
 
 ## Task 24 — `capsule conformance`: the spec test suite and performance budget
+
+**Status:** Completed (PASS)
+**Attempt Ledger:**
+- attempt 1: initial Task 24 implementation -> verifier FAIL (unsigned capsule skipping to pass, schema depth measurement counting keyword objects, ConformanceReport shape aliases)
+- attempt 2 (opus-coder): fail C03 on unsigned capsule with error severity, subschema-based depth calculation in shapeOf, attach total/passed/failed/skipped/budgets to ConformanceReport -> verifier PASS
 
 **Goal:** a single command that decides whether a `.capsule` file is a conforming capsule, and
 that doubles as the regression harness for the host.
@@ -2153,6 +2174,8 @@ report type.
 ---
 
 ## Task 25 — Interop and installation: Agent Plugins export, MCP config injection, `.capsule` handler
+
+**Status:** Completed (PASS)
 
 **Goal:** meet the 2026 ecosystem where it is, without guessing at anybody's private paths.
 **Difficulty:** EASY
