@@ -1,0 +1,389 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
+import { digestOf } from "../src/core/digest.ts";
+import { CapsuleError, type CapsuleErrorCode } from "../src/core/errors.ts";
+import { parseManifest, type EffectName, type Manifest } from "../src/format/manifest.ts";
+import { createEffects, type EffectsController } from "../src/runtime/effects.ts";
+import { EVENT, openJournal, type Journal, type RecordedEffect } from "../src/runtime/journal.ts";
+import { buildPolicy } from "../src/runtime/policy.ts";
+import { openState, type CapsuleState } from "../src/runtime/state.ts";
+
+const capsuleError =
+  (code: CapsuleErrorCode, message?: RegExp) =>
+  (e: unknown): boolean =>
+    e instanceof CapsuleError && e.code === code && (message === undefined || message.test(e.message));
+
+const CAPSULE = "sha256:" + "1".repeat(64);
+
+/** The clock hands out a fixed sequence so a recorded run has a value a replay can be judged against. */
+const TIMES = ["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z"];
+
+const BASE = {
+  spec_version: "0.1.0",
+  meta: { name: "hello", version: "1.0.0", title: "Hello", description: "A hello capsule." },
+  runtime: { type: "quickjs-1", entry: "src/main.js" },
+};
+
+function manifestWith(capabilities: Record<string, unknown>, effects: EffectName[]): Manifest {
+  return parseManifest({
+    ...BASE,
+    capabilities,
+    tools: [
+      { name: "greet", title: "Greet", description: "Greets.", inputSchema: { type: "object" }, effects },
+    ],
+  });
+}
+
+const ALL_LOCAL: EffectName[] = [
+  "clock.now",
+  "random.bytes",
+  "log.write",
+  "kv.get",
+  "kv.set",
+  "sql.query",
+  "sql.exec",
+];
+
+const LOCAL = manifestWith({ kv: true, sql: true }, ALL_LOCAL);
+
+type Ctx = {
+  journal: Journal;
+  state: CapsuleState;
+  /** A controller bound to a fresh run, so record and replay never share an ordinal counter. */
+  effects(opts: {
+    mode: "record" | "replay";
+    recorded?: RecordedEffect[];
+    manifest?: Manifest;
+    grants?: Record<string, boolean>;
+    tool?: string;
+    state?: CapsuleState;
+    netFetch?: (url: string, init?: unknown) => Promise<unknown>;
+    packWrite?: (dir: string, out?: string) => Promise<unknown>;
+  }): { runId: string; controller: EffectsController };
+};
+
+/**
+ * Guest state and the journal are separate files by design, so a test gets two sidecars under
+ * `.tmp/` and removes both. Handles are closed before the files are unlinked: Windows will not
+ * unlink a database SQLite still has open.
+ */
+async function withRun(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+  const appPath = join(".tmp", `app-${randomUUID()}.sqlite`);
+  const journalPath = join(".tmp", `journal-${randomUUID()}.sqlite`);
+  const journal = openJournal(journalPath);
+  const state = openState(appPath);
+  try {
+    await fn({
+      journal,
+      state,
+      effects(opts) {
+        const manifest = opts.manifest ?? LOCAL;
+        const runId = randomUUID();
+        journal.beginRun({ runId, capsuleId: CAPSULE, tool: "greet", mode: opts.mode });
+        let next = 0;
+        const controller = createEffects({
+          policy: buildPolicy({ manifest, capsuleId: CAPSULE, grants: opts.grants ?? {} }),
+          journal,
+          runId,
+          tool: opts.tool ?? "greet",
+          mode: opts.mode,
+          recorded: opts.recorded,
+          state: "state" in opts ? opts.state : state,
+          clock: () => TIMES[next++] ?? "2026-01-01T00:00:09.000Z",
+          randomBytes: (n) => "aa".repeat(n),
+          netFetch: opts.netFetch,
+          packWrite: opts.packWrite,
+        });
+        return { runId, controller };
+      },
+    });
+  } finally {
+    state.close();
+    journal.close();
+    for (const path of [appPath, journalPath]) {
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) rmSync(`${path}${suffix}`, { force: true });
+    }
+  }
+}
+
+/** `log.write` goes to stderr by design, so the test reads it there instead of shouting into it. */
+async function captureStderr(fn: () => Promise<void>): Promise<string[]> {
+  const chunks: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = original;
+  }
+  return chunks;
+}
+
+test("records then replays an identical effect sequence", async () => {
+  await withRun(async ({ journal, state, effects }) => {
+    const record = effects({ mode: "record" });
+    assert.equal(await record.controller.dispatch("greet", "kv.set", { key: "greeting", value: "hi" }), true);
+    assert.equal(await record.controller.dispatch("greet", "kv.get", { key: "greeting" }), "hi");
+    assert.equal(await record.controller.dispatch("greet", "clock.now", {}), TIMES[0]);
+    assert.equal(record.controller.count(), 3);
+
+    // Six events: one request and one completion per effect, in a chain that still verifies.
+    const events = journal.events(record.runId);
+    assert.deepEqual(
+      events.map((e) => e.type),
+      [
+        EVENT.effectRequested,
+        EVENT.effectCompleted,
+        EVENT.effectRequested,
+        EVENT.effectCompleted,
+        EVENT.effectRequested,
+        EVENT.effectCompleted,
+      ],
+    );
+    assert.deepEqual(events[0]?.payload, {
+      i: 0,
+      op: "kv.set",
+      paramsDigest: digestOf({ key: "greeting", value: "hi" }),
+    });
+    assert.doesNotThrow(() => journal.verifyChain(record.runId));
+
+    const recorded = journal.effects(record.runId);
+    assert.deepEqual(
+      recorded.map((e) => [e.i, e.op, e.value]),
+      [
+        [0, "kv.set", true],
+        [1, "kv.get", "hi"],
+        [2, "clock.now", TIMES[0]],
+      ],
+    );
+    for (const effect of recorded) {
+      assert.equal(effect.valueDigest, digestOf(effect.value));
+      // Timing is bucketed to 10 ms so it cannot make the chain unreproducible.
+      assert.equal(typeof effect.ms, "number");
+      assert.equal((effect.ms ?? 1) % 10, 0);
+    }
+
+    // Wipe the row the recorded run wrote: replay must not touch state to produce the same values.
+    state.sqlExec("DELETE FROM kv");
+    assert.equal(state.kvGet("greeting"), null);
+
+    const replay = effects({ mode: "replay", recorded });
+    assert.equal(await replay.controller.dispatch("greet", "kv.set", { key: "greeting", value: "hi" }), true);
+    assert.equal(await replay.controller.dispatch("greet", "kv.get", { key: "greeting" }), "hi");
+    assert.equal(await replay.controller.dispatch("greet", "clock.now", {}), TIMES[0]);
+    assert.equal(state.kvGet("greeting"), null);
+
+    // Same values and digests as the recording, minus the timings.
+    const replayed = journal.effects(replay.runId);
+    assert.deepEqual(
+      replayed,
+      recorded.map(({ ms, ...rest }) => {
+        void ms;
+        return rest;
+      }),
+    );
+    assert.doesNotThrow(() => journal.verifyChain(replay.runId));
+  });
+});
+
+test("replay diverges when the op order changes", async () => {
+  await withRun(async ({ journal, effects }) => {
+    const record = effects({ mode: "record" });
+    await record.controller.dispatch("greet", "kv.set", { key: "a", value: "1" });
+    await record.controller.dispatch("greet", "clock.now", {});
+    const recorded = journal.effects(record.runId);
+
+    const replay = effects({ mode: "replay", recorded });
+    await assert.rejects(
+      () => replay.controller.dispatch("greet", "clock.now", {}),
+      capsuleError("E_NONDETERMINISM", /^effect #0 diverged: expected kv\.set\/sha256:[0-9a-f]{64}, got clock\.now\/sha256:[0-9a-f]{64}$/),
+    );
+
+    // An effect that runs past the end of the recording diverges the same way.
+    const short = effects({ mode: "replay", recorded: [] });
+    await assert.rejects(
+      () => short.controller.dispatch("greet", "clock.now", {}),
+      capsuleError("E_NONDETERMINISM", /^effect #0 diverged: expected undefined\/undefined, got clock\.now\//),
+    );
+  });
+});
+
+test("replay diverges when params change", async () => {
+  await withRun(async ({ journal, effects }) => {
+    const record = effects({ mode: "record" });
+    await record.controller.dispatch("greet", "kv.get", { key: "a" });
+    const recorded = journal.effects(record.runId);
+
+    const replay = effects({ mode: "replay", recorded });
+    await assert.rejects(
+      () => replay.controller.dispatch("greet", "kv.get", { key: "b" }),
+      capsuleError("E_NONDETERMINISM", /diverged/),
+    );
+  });
+});
+
+test("enforces per-op limits", async () => {
+  await withRun(async ({ effects }) => {
+    const { controller } = effects({ mode: "record" });
+    assert.equal(await controller.dispatch("greet", "random.bytes", { n: 1 }), "aa");
+    assert.equal(((await controller.dispatch("greet", "random.bytes", { n: 64 })) as string).length, 128);
+    for (const n of [0, 65, 1.5, -1]) {
+      await assert.rejects(
+        () => controller.dispatch("greet", "random.bytes", { n }),
+        capsuleError("E_USAGE", /random\.bytes requires 1 <= n <= 64/),
+      );
+    }
+
+    await assert.rejects(
+      () => controller.dispatch("greet", "kv.set", { key: "k", value: "x".repeat(65 * 1024) }),
+      capsuleError("E_USAGE", /kv value exceeds 65536 characters/),
+    );
+    await assert.rejects(
+      () => controller.dispatch("greet", "kv.get", { key: "k".repeat(257) }),
+      capsuleError("E_USAGE", /kv key exceeds 256 characters/),
+    );
+    // A limit violation still leaves the journal chain intact: the request was journalled, the
+    // completion was not, and the ordinal was consumed.
+    assert.equal(controller.count(), 8);
+
+    await assert.rejects(
+      () => controller.dispatch("greet", "log.write", { message: 42 }),
+      capsuleError("E_USAGE", /log\.write requires a string message/),
+    );
+    // An oversized log message is truncated rather than refused, so a chatty capsule still runs,
+    // and what reaches the terminal is sanitised: no escape sequences, on stderr, one line.
+    const written = await captureStderr(async () => {
+      assert.equal(await controller.dispatch("greet", "log.write", { message: "y".repeat(4096) }), true);
+      assert.equal(await controller.dispatch("greet", "log.write", { message: "\u001B[31mred\u001B[0m" }), true);
+    });
+    assert.equal(written.length, 2);
+    assert.equal(written[0]?.length, 2049);
+    assert.equal(written[0]?.endsWith(" …[truncated]\n"), true);
+    assert.equal(written[1], "red\n");
+
+    await assert.rejects(
+      () => controller.dispatch("greet", "sql.query", { sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 2000) SELECT n FROM c" }),
+      capsuleError("E_USAGE", /sql\.query returned more than 1000 rows/),
+    );
+  });
+});
+
+test("blocks ATTACH and PRAGMA in sql.exec", async () => {
+  await withRun(async ({ effects, state }) => {
+    const { controller } = effects({ mode: "record" });
+    const blocked = capsuleError("E_POLICY", /^sql\.exec disallows ATTACH\/PRAGMA\/VACUUM$/);
+    for (const sql of [
+      "ATTACH DATABASE 'evil.sqlite' AS evil",
+      "attach database 'evil.sqlite' as evil",
+      "PRAGMA journal_mode=DELETE",
+      "VACUUM",
+      "  /* sneaky */ ATTACH DATABASE 'evil.sqlite' AS evil",
+      "-- comment\nPRAGMA foreign_keys=OFF",
+    ]) {
+      await assert.rejects(() => controller.dispatch("greet", "sql.exec", { sql }), blocked);
+    }
+    assert.deepEqual(state.sqlQuery("PRAGMA database_list").length, 1);
+
+    // Ordinary statements still work, and the read-only handle refuses to write.
+    assert.deepEqual(await controller.dispatch("greet", "sql.exec", { sql: "CREATE TABLE t (a TEXT)" }), {
+      changes: 0,
+    });
+    assert.deepEqual(
+      await controller.dispatch("greet", "sql.exec", { sql: "INSERT INTO t (a) VALUES (?)", params: ["x"] }),
+      { changes: 1 },
+    );
+    // node:sqlite hands back null-prototype rows, which is exactly what a guest-supplied column name
+    // should land in; spread them into plain objects to compare.
+    const rows = (await controller.dispatch("greet", "sql.query", { sql: "SELECT a FROM t" })) as object[];
+    assert.deepEqual(rows.map((row) => ({ ...row })), [{ a: "x" }]);
+    await assert.rejects(() => controller.dispatch("greet", "sql.query", { sql: "DELETE FROM t" }), /readonly/);
+  });
+});
+
+test("policy denial happens before journalling", async () => {
+  await withRun(async ({ journal, effects }) => {
+    const { runId, controller } = effects({
+      mode: "record",
+      manifest: manifestWith({}, ["clock.now"]),
+    });
+    await assert.rejects(
+      () => controller.dispatch("greet", "kv.get", { key: "a" }),
+      capsuleError("E_POLICY", /^tool greet did not declare effect kv\.get$/),
+    );
+    assert.equal(journal.events(runId).length, 0);
+    assert.equal(controller.count(), 0);
+  });
+});
+
+test("effects are bound to the run's tool", async () => {
+  await withRun(async ({ journal, effects }) => {
+    const { runId, controller } = effects({ mode: "record", tool: "greet" });
+    await assert.rejects(
+      () => controller.dispatch("other", "clock.now", {}),
+      capsuleError("E_POLICY", /^effects are bound to tool greet, not other$/),
+    );
+    assert.equal(journal.events(runId).length, 0);
+  });
+});
+
+test("delegates net.fetch and pack.write to the injected ports", async () => {
+  await withRun(async ({ effects }) => {
+    const calls: unknown[] = [];
+    const manifest = manifestWith({ pack: true, net: { allowed_hosts: ["api.example.com"] } }, [
+      "net.fetch",
+      "pack.write",
+    ]);
+    const grants = { pack: true, "net:api.example.com": true };
+    const { controller } = effects({
+      mode: "record",
+      manifest,
+      grants,
+      netFetch: async (url, init) => {
+        calls.push([url, init]);
+        return { status: 200, headers: {}, body: "ok" };
+      },
+      packWrite: async (dir, out) => {
+        calls.push([dir, out]);
+        return { path: out ?? "capsule.capsule" };
+      },
+    });
+    assert.deepEqual(await controller.dispatch("greet", "net.fetch", { url: "https://api.example.com/v1" }), {
+      status: 200,
+      headers: {},
+      body: "ok",
+    });
+    assert.deepEqual(await controller.dispatch("greet", "pack.write", { dir: "src", out: "out.capsule" }), {
+      path: "out.capsule",
+    });
+    assert.deepEqual(calls, [["https://api.example.com/v1", undefined], ["src", "out.capsule"]]);
+
+    // The host, not the whole URL, is what the policy is asked about.
+    await assert.rejects(
+      () => controller.dispatch("greet", "net.fetch", { url: "https://evil.com/steal" }),
+      capsuleError("E_POLICY", /^host evil\.com is not in capabilities\.net\.allowed_hosts$/),
+    );
+
+    // A port that was never wired is a usage error, not a silent success.
+    const bare = effects({ mode: "record", manifest, grants });
+    await assert.rejects(
+      () => bare.controller.dispatch("greet", "net.fetch", { url: "https://api.example.com/v1" }),
+      capsuleError("E_USAGE", /^net\.fetch is not available in this runtime$/),
+    );
+  });
+});
+
+test("kv and sql refuse to run without capsule state", async () => {
+  await withRun(async ({ effects }) => {
+    const { controller } = effects({ mode: "record", state: undefined });
+    await assert.rejects(
+      () => controller.dispatch("greet", "kv.get", { key: "a" }),
+      capsuleError("E_USAGE", /^kv\.get requires capsule state$/),
+    );
+  });
+});
