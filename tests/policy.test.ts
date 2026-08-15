@@ -260,13 +260,57 @@ test("requiredGrants covers every allowed host plus loopback, and the fixture ne
   assert.deepEqual(wide.missingGrants("greet"), ["net:*.cdn.example.com", "net:localhost"]);
 });
 
-test("a wildcard host grant does not authorise a concrete host", () => {
-  const wild = manifestWith({ net: { allowed_hosts: ["*.example.com"] } }, ["net.fetch"]);
-  const policy = policyFor(wild, { "net:*.example.com": true });
+test("a wildcard host grant authorises every host that pattern covers", () => {
+  const wild = manifestWith({ net: { allowed_hosts: ["*.cdn.example.com"] } }, ["net.fetch"]);
+
+  // A consent flow can only ever offer the grants `requiredGrants` reports, and for a wildcard entry
+  // that is the pattern — so the pattern is the grant `check` enforces and names when it is missing.
+  const ungranted = policyFor(wild);
+  assert.deepEqual(ungranted.requiredGrants("greet"), ["net:*.cdn.example.com"]);
+  assert.deepEqual(ungranted.missingGrants("greet"), ["net:*.cdn.example.com"]);
   assert.throws(
-    () => policy.check("greet", "net.fetch", "https://a.example.com/"),
-    policyError(/^missing user grant: net:a\.example\.com$/),
+    () => ungranted.check("greet", "net.fetch", "https://a.cdn.example.com"),
+    policyError(/^missing user grant: net:\*\.cdn\.example\.com$/),
   );
+
+  const policy = policyFor(wild, { "net:*.cdn.example.com": true });
+  assert.doesNotThrow(() => policy.check("greet", "net.fetch", "https://a.cdn.example.com"));
+  assert.doesNotThrow(() => policy.check("greet", "net.fetch", "https://b.a.cdn.example.com/x"));
+  assert.deepEqual(policy.missingGrants("greet"), []);
+
+  // The grant never widens allowed_hosts: the apex and a foreign host stay denied by the manifest.
+  assert.throws(
+    () => policy.check("greet", "net.fetch", "https://cdn.example.com/"),
+    policyError(/^host cdn\.example\.com is not in capabilities\.net\.allowed_hosts$/),
+  );
+  assert.throws(
+    () => policy.check("greet", "net.fetch", "https://evil.com/"),
+    policyError(/^host evil\.com is not in capabilities\.net\.allowed_hosts$/),
+  );
+
+  // A concrete grant is strictly narrower than the pattern, so it is honoured for that one host.
+  const concrete = policyFor(wild, { "net:a.cdn.example.com": true });
+  assert.doesNotThrow(() => concrete.check("greet", "net.fetch", "https://a.cdn.example.com"));
+  assert.throws(
+    () => concrete.check("greet", "net.fetch", "https://b.cdn.example.com"),
+    policyError(/^missing user grant: net:\*\.cdn\.example\.com$/),
+  );
+});
+
+test("a host listed exactly is refused by its own name even when a pattern also covers it", () => {
+  const both = manifestWith(
+    { net: { allowed_hosts: ["a.cdn.example.com", "*.cdn.example.com"] } },
+    ["net.fetch"],
+  );
+  assert.throws(
+    () => policyFor(both).check("greet", "net.fetch", "https://a.cdn.example.com"),
+    policyError(/^missing user grant: net:a\.cdn\.example\.com$/),
+  );
+  // Both names are on the list `requiredGrants` reports, so either one opens the host.
+  for (const grant of ["net:a.cdn.example.com", "net:*.cdn.example.com"]) {
+    const policy = policyFor(both, { [grant]: true });
+    assert.doesNotThrow(() => policy.check("greet", "net.fetch", "https://a.cdn.example.com"));
+  }
 });
 
 test("grants round-trip through CAPSULE_HOME and start empty", () => {
@@ -303,7 +347,7 @@ test("a malformed grants file is an error, not an empty store", () => {
     writeFileSync(file, "{not json");
     assert.throws(() => loadGrants(), policyError(/not valid JSON/));
     writeFileSync(file, JSON.stringify({ version: 2, capsules: {} }));
-    assert.throws(() => loadGrants(), policyError(/unsupported grants version/));
+    assert.throws(() => loadGrants(), policyError(/unsupported grant store version/));
     writeFileSync(file, JSON.stringify({ version: 1, capsules: [] }));
     assert.throws(() => loadGrants(), policyError(/malformed/));
     writeFileSync(file, JSON.stringify({ version: 1, capsules: { hello: { pack: "yes" } } }));

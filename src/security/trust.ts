@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { capsuleHome } from "./signing.ts";
+import { readStore, writeStore } from "./store.ts";
 
 export type TrustEntry = {
   keyId: string;
@@ -39,70 +39,33 @@ function isTrustEntry(value: unknown): value is TrustEntry {
 }
 
 /**
- * Capsule names are attacker-supplied strings, and the manifest name pattern allows `constructor`.
- * On a plain `{}` dictionary `capsules["constructor"]` would resolve to the inherited `Object`
- * instead of `undefined`, and `capsules["__proto__"] = entry` would hit the inherited setter,
- * silently dropping the pin. A prototype-less dictionary makes every name an ordinary key; it still
- * round-trips through `JSON.stringify`/`JSON.parse`, which define `__proto__` as an own property.
- */
-function emptyCapsules(): Record<string, TrustEntry> {
-  return Object.create(null) as Record<string, TrustEntry>;
-}
-
-/**
  * A malformed store is an error, never an empty store: silently discarding pins would turn every
  * corrupted file into a free trust-on-first-use for whatever capsule the user runs next.
  */
 export function loadTrustStore(homeDir: string = capsuleHome()): TrustStore {
   const file = trustPath(homeDir);
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, capsules: emptyCapsules() };
-    throw e;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new CapsuleError("E_TRUST", `trust store is not valid JSON: ${file}`, { cause: (e as Error).message });
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new CapsuleError("E_TRUST", `trust store is malformed: ${file}`);
-  }
-
-  const store = parsed as Record<string, unknown>;
-  if (store["version"] !== 1) {
-    throw new CapsuleError("E_TRUST", `unsupported trust store version in ${file}`, { version: store["version"] });
-  }
-  const capsules = store["capsules"];
-  if (typeof capsules !== "object" || capsules === null || Array.isArray(capsules)) {
-    throw new CapsuleError("E_TRUST", `trust store is malformed: ${file}`);
-  }
-
-  const entries = emptyCapsules();
-  for (const [name, entry] of Object.entries(capsules as Record<string, unknown>)) {
-    if (!isTrustEntry(entry)) {
-      throw new CapsuleError("E_TRUST", `trust store entry is malformed: ${name}`, { file, name });
-    }
-    entries[name] = {
-      keyId: entry.keyId,
-      publicKey: entry.publicKey,
-      toolCatalogDigest: entry.toolCatalogDigest,
-      pinnedAt: entry.pinnedAt,
-    };
-  }
-  return { version: 1, capsules: entries };
+  return {
+    version: 1,
+    capsules: readStore(file, {
+      code: "E_TRUST",
+      label: "trust store",
+      entry: (value, name) => {
+        if (!isTrustEntry(value)) {
+          throw new CapsuleError("E_TRUST", `trust store entry is malformed: ${name}`, { file, name });
+        }
+        return {
+          keyId: value.keyId,
+          publicKey: value.publicKey,
+          toolCatalogDigest: value.toolCatalogDigest,
+          pinnedAt: value.pinnedAt,
+        };
+      },
+    }),
+  };
 }
 
 export function saveTrustStore(store: TrustStore, homeDir: string = capsuleHome()): void {
-  const file = trustPath(homeDir);
-  const tmp = `${file}.tmp`;
-  mkdirSync(homeDir, { recursive: true });
-  writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, file);
+  writeStore(trustPath(homeDir), store);
 }
 
 /**

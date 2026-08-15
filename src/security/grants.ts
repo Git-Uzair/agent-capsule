@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { capsuleHome } from "./signing.ts";
+import { emptyDict, readStore, writeStore } from "./store.ts";
 
 /**
  * `capsules[capsuleId][grant] === true` means the user has said yes to that grant for that capsule.
@@ -17,17 +17,6 @@ const GRANTS_FILE = "grants.json";
 
 function grantsPath(homeDir: string): string {
   return join(homeDir, GRANTS_FILE);
-}
-
-/**
- * Capsule ids and grant names are attacker-influenced strings, so both dictionary levels are
- * prototype-less: on a plain `{}` a lookup of `constructor` would answer with the inherited
- * `Object` instead of `undefined`, and `dict["__proto__"] = true` would hit the inherited setter
- * and silently drop the grant. Null-prototype objects still round-trip through
- * `JSON.stringify`/`JSON.parse`, which defines `__proto__` as an own property.
- */
-function emptyDict<T>(): Record<string, T> {
-  return Object.create(null) as Record<string, T>;
 }
 
 /** Re-seat a dictionary a caller may have built as a plain object, keeping its own keys. */
@@ -47,56 +36,30 @@ function fail(message: string, detail: Record<string, unknown> = {}): never {
  */
 export function loadGrants(homeDir: string = capsuleHome()): GrantsStore {
   const file = grantsPath(homeDir);
-  let raw: string;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, capsules: emptyDict() };
-    throw e;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    fail(`grant store is not valid JSON: ${file}`, { cause: (e as Error).message });
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    fail(`grant store is malformed: ${file}`);
-  }
-
-  const store = parsed as Record<string, unknown>;
-  if (store["version"] !== 1) {
-    fail(`unsupported grants version in ${file}`, { version: store["version"] });
-  }
-  const capsules = store["capsules"];
-  if (typeof capsules !== "object" || capsules === null || Array.isArray(capsules)) {
-    fail(`grant store is malformed: ${file}`);
-  }
-
-  const entries = emptyDict<Record<string, boolean>>();
-  for (const [capsuleId, grants] of Object.entries(capsules as Record<string, unknown>)) {
-    if (typeof grants !== "object" || grants === null || Array.isArray(grants)) {
-      fail(`grant store entry is malformed: ${capsuleId}`, { file, capsuleId });
-    }
-    const dict = emptyDict<boolean>();
-    for (const [grant, value] of Object.entries(grants as Record<string, unknown>)) {
-      if (typeof value !== "boolean") {
-        fail(`grant store entry is malformed: ${capsuleId}`, { file, capsuleId, grant });
-      }
-      dict[grant] = value;
-    }
-    entries[capsuleId] = dict;
-  }
-  return { version: 1, capsules: entries };
+  return {
+    version: 1,
+    capsules: readStore(file, {
+      code: "E_POLICY",
+      label: "grant store",
+      entry: (value, capsuleId) => {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          fail(`grant store entry is malformed: ${capsuleId}`, { file, capsuleId });
+        }
+        const dict = emptyDict<boolean>();
+        for (const [grant, flag] of Object.entries(value as Record<string, unknown>)) {
+          if (typeof flag !== "boolean") {
+            fail(`grant store entry is malformed: ${capsuleId}`, { file, capsuleId, grant });
+          }
+          dict[grant] = flag;
+        }
+        return dict;
+      },
+    }),
+  };
 }
 
 export function saveGrants(store: GrantsStore, homeDir: string = capsuleHome()): void {
-  const file = grantsPath(homeDir);
-  const tmp = `${file}.tmp`;
-  mkdirSync(homeDir, { recursive: true });
-  writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, file);
+  writeStore(grantsPath(homeDir), store);
 }
 
 export function hasGrant(store: GrantsStore, capsuleId: string, grant: string): boolean {

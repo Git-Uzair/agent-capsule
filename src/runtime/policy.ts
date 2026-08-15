@@ -99,6 +99,21 @@ export function buildPolicy(opts: {
     if (!granted(grant)) fail(`missing user grant: ${grant}`, { ...detail, grant });
   };
 
+  /**
+   * Every grant that authorises `host`, ordered the way `requiredGrants` reports them: the concrete
+   * name first when the manifest listed the host exactly, then each declared `*.suffix` pattern that
+   * covers it. Demanding the concrete host alone would demand a grant `requiredGrants` can never
+   * offer for a wildcard entry, so granting everything `missingGrants` lists would still leave the
+   * host unreachable. A concrete grant is honoured either way — it is strictly narrower than the
+   * pattern. Loopback is one grant for all three spellings.
+   */
+  const netGrantsFor = (host: string): string[] => {
+    if (LOOPBACK.has(host)) return [GRANT_LOCALHOST];
+    const covering = net.allowed_hosts.map(normalize).filter((p) => hostAllowed(host, [p], false));
+    const patterns = covering.filter((p) => p !== host).map((p) => `net:${p}`);
+    return covering.includes(host) ? [`net:${host}`, ...patterns] : [...patterns, `net:${host}`];
+  };
+
   const check = (tool: string, op: EffectName, target?: string): void => {
     // An unknown tool declared nothing, which is the same answer as a tool that declared something
     // else: the effect is not on its list.
@@ -116,7 +131,10 @@ export function buildPolicy(opts: {
       if (!hostAllowed(raw, net.allowed_hosts, net.allow_localhost)) {
         fail(`host ${host} is not in capabilities.net.allowed_hosts`, { tool, op, target, host });
       }
-      requireGrant(LOOPBACK.has(host) ? GRANT_LOCALHOST : `net:${host}`, { tool, op, host });
+      const candidates = netGrantsFor(host);
+      // The first candidate is the one `requiredGrants` reports, so an ungranted host is refused by
+      // the name the consent flow will offer.
+      requireGrant(candidates.find(granted) ?? candidates[0] ?? `net:${host}`, { tool, op, host });
     }
     if (op === "pack.write") requireGrant(GRANT_PACK, { tool, op });
   };
