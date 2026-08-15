@@ -5,6 +5,7 @@ import { mcpCommand } from "./commands/mcp.ts";
 import { packCommand } from "./commands/pack.ts";
 import { replayCommand } from "./commands/replay.ts";
 import { runCommand } from "./commands/run.ts";
+import { uiCommand } from "./commands/ui.ts";
 import { verifyCommand } from "./commands/verify.ts";
 
 type Command = (argv: string[]) => Promise<number>;
@@ -15,6 +16,7 @@ const COMMANDS = new Map<string, Command>([
   ["run", runCommand],
   ["replay", replayCommand],
   ["mcp", mcpCommand],
+  ["ui", uiCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]
