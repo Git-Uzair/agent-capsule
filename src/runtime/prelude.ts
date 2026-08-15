@@ -22,6 +22,7 @@ export const PRELUDE = `(() => {
   const stringify = JSON.stringify;
   const parse = JSON.parse;
   const apply = Reflect.apply;
+  const hasOwn = Object.prototype.hasOwnProperty;
   const raw = g.__capsule;
   const tool = g.__tool;
   const argsJson = g.__args;
@@ -198,7 +199,13 @@ export const PRELUDE = `(() => {
   // have: its own tool, called with the arguments it was going to be given.
   return () => {
     const tools = g.tools;
-    const fn = tools && tools[tool];
+    // A tool has to be one the capsule wrote down. Reading \`tools[tool]\` on its own is a lookup
+    // through the prototype chain, so \`toString\`, \`constructor\` and \`hasOwnProperty\` would be
+    // answered by \`Object.prototype\` and every capsule would silently implement them — with results
+    // no caller asked for. Only an own property counts, tested with the real \`hasOwnProperty\`
+    // captured above, since the one on the table itself may be the capsule's own tool.
+    const table = tools !== null && (typeof tools === "object" || typeof tools === "function") ? tools : undefined;
+    const fn = table !== undefined && apply(hasOwn, table, [tool]) ? table[tool] : undefined;
     if (typeof fn !== "function") return stringify({ status: "no_tool" });
     // Called as a method of the tool table, exactly as \`tools[name](args)\` would be: a tool is
     // allowed to be a method that reaches a sibling through \`this\`. The receiver goes through the

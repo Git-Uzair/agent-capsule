@@ -33,12 +33,33 @@ export type RunGuestOptions = {
 const invocation = (key: string): string => `this[${JSON.stringify(key)}]()`;
 
 /**
+ * The one budget both sides of the ABI answer to. QuickJS's interrupt handler only runs while the
+ * interpreter does, and an effect suspends it: the guest is frozen mid-call and the host is awaiting
+ * a promise, so time spent in `dispatch` is time no interrupt can see. The flag is what carries that
+ * verdict back out — a tool is free to catch the error it is handed, and catching it must not buy it
+ * a longer run than the caller allowed.
+ */
+type Budget = { readonly at: number; spent: boolean };
+
+/** Whether the deadline has passed; once it has, it has, for the rest of the run. */
+function expired(budget: Budget): boolean {
+  if (Date.now() >= budget.at) budget.spent = true;
+  return budget.spent;
+}
+
+const TIMED_OUT = { code: "E_TIMEOUT", message: "tool exceeded timeout_ms" } as const;
+
+/**
  * The host side of the guest ABI. It must never reject: a rejected promise inside an asyncified call
  * leaves the guest suspended for ever — the interpreter is unwound, so not even the interrupt
  * handler can end it — so every failure is encoded as a value instead, and the guest sees a code and
  * a cleaned message rather than a host stack trace.
+ *
+ * The deadline is checked on the way back, whichever way the effect went. Suspension is the one
+ * stretch of a run the interrupt handler cannot police, so this is where an over-long one is caught:
+ * the guest is told, and the flag makes sure the host says so too.
  */
-async function answer(opts: RunGuestOptions, payload: string): Promise<string> {
+async function answer(opts: RunGuestOptions, budget: Budget, payload: string): Promise<string> {
   try {
     const request = JSON.parse(payload) as { op?: unknown; params?: unknown };
     if (typeof request.op !== "string") {
@@ -47,8 +68,10 @@ async function answer(opts: RunGuestOptions, payload: string): Promise<string> {
     // An op the guest invented is not trusted here: `dispatch` runs it past the policy, which denies
     // everything the manifest did not declare, before any handler sees it.
     const value = await opts.dispatch(opts.tool, request.op as EffectName, request.params);
+    if (expired(budget)) return JSON.stringify({ ok: false, error: TIMED_OUT });
     return JSON.stringify({ ok: true, value: value ?? null });
   } catch (e) {
+    if (expired(budget)) return JSON.stringify({ ok: false, error: TIMED_OUT });
     const code = e instanceof CapsuleError ? e.code : "E_GUEST";
     const message = e instanceof CapsuleError ? sanitizeModelText(e.message, MAX_MESSAGE_CHARS) : "the effect failed";
     return JSON.stringify({ ok: false, error: { code, message } });
@@ -58,9 +81,10 @@ async function answer(opts: RunGuestOptions, payload: string): Promise<string> {
 /**
  * Every guest failure, whichever of the three evaluations produced it. QuickJS reports an interrupt
  * as `InternalError: interrupted`; requiring the deadline to have passed as well means a guest that
- * throws a look-alike error cannot have its own bug reported as the host's timeout.
+ * throws a look-alike error cannot have its own bug reported as the host's timeout. A budget already
+ * spent inside an effect is the timeout on its own — the guest is only re-throwing what it was told.
  */
-function failure(deadline: number, dumped: unknown): CapsuleError {
+function failure(budget: Budget, dumped: unknown): CapsuleError {
   const thrown = typeof dumped === "object" && dumped !== null ? (dumped as { name?: unknown; message?: unknown }) : {};
   const message =
     typeof thrown.message === "string"
@@ -69,8 +93,8 @@ function failure(deadline: number, dumped: unknown): CapsuleError {
         ? dumped
         : "the guest threw a non-Error value";
 
-  if (thrown.name === "InternalError" && message === "interrupted" && Date.now() >= deadline) {
-    return new CapsuleError("E_TIMEOUT", "tool exceeded timeout_ms");
+  if (budget.spent || (thrown.name === "InternalError" && message === "interrupted" && expired(budget))) {
+    return new CapsuleError("E_TIMEOUT", TIMED_OUT.message);
   }
   return new CapsuleError("E_GUEST", sanitizeModelText(message, MAX_MESSAGE_CHARS) || "the guest failed");
 }
@@ -78,7 +102,7 @@ function failure(deadline: number, dumped: unknown): CapsuleError {
 /** Evaluates one piece of guest code and hands back its value; the caller owns the handle. */
 async function evaluateValue(
   context: QuickJSAsyncContext,
-  deadline: number,
+  budget: Budget,
   code: string,
   filename: string,
 ): Promise<QuickJSHandle> {
@@ -89,11 +113,11 @@ async function evaluateValue(
     // A host-side throw here is still the guest's doing — recursion deep enough to exhaust the
     // host's own JavaScript stack surfaces as a `RangeError` on this side of the boundary — so it is
     // reported as a guest failure instead of escaping to the caller as an internal error.
-    throw failure(deadline, e instanceof Error ? { name: e.name, message: e.message } : e);
+    throw failure(budget, e instanceof Error ? { name: e.name, message: e.message } : e);
   }
 
   if (result.error) {
-    throw failure(deadline, result.error.consume(context.dump));
+    throw failure(budget, result.error.consume(context.dump));
   }
   return result.value;
 }
@@ -101,11 +125,11 @@ async function evaluateValue(
 /** Evaluates one piece of guest code and returns its value when that value is a string. */
 async function evaluate(
   context: QuickJSAsyncContext,
-  deadline: number,
+  budget: Budget,
   code: string,
   filename: string,
 ): Promise<string | undefined> {
-  const value = await evaluateValue(context, deadline, code, filename);
+  const value = await evaluateValue(context, budget, code, filename);
   return value.consume((handle) => (context.typeof(handle) === "string" ? context.getString(handle) : undefined));
 }
 
@@ -180,14 +204,14 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
   // process's exit status on its way out — a status that would then outlive this call and make every
   // later command in the process report failure. It is put back exactly as it was found.
   const priorExitCode = process.exitCode;
-  const deadline = Date.now() + opts.runtime.timeout_ms;
+  const budget: Budget = { at: Date.now() + opts.runtime.timeout_ms, spent: false };
   const module = await newQuickJSAsyncWASMModule();
   const context = module.newContext();
   let invoker: QuickJSHandle | undefined;
   try {
     context.runtime.setMemoryLimit(opts.runtime.memory_limit_mb * 1024 * 1024);
     context.runtime.setMaxStackSize(STACK_SIZE_BYTES);
-    context.runtime.setInterruptHandler(shouldInterruptAfterDeadline(deadline));
+    context.runtime.setInterruptHandler(shouldInterruptAfterDeadline(budget.at));
 
     // Installing a global consumes the handle: nothing the host creates inside the guest outlives
     // the statement that put it there.
@@ -202,7 +226,7 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
     setGlobal(
       "__capsule",
       context.newAsyncifiedFunction("__capsule", async (payload) =>
-        context.newString(await answer(opts, context.getString(payload))),
+        context.newString(await answer(opts, budget, context.getString(payload))),
       ),
     );
     setGlobal("__tool", context.newString(opts.tool));
@@ -212,8 +236,8 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
     // capsule's own source runs there is nothing for it to read, redefine or delete: the name below
     // comes into existence after that source has finished, and no guest code runs between the two
     // evaluations — pending jobs are never executed, so a microtask cannot look either.
-    invoker = await evaluateValue(context, deadline, PRELUDE, "capsule:prelude");
-    await evaluate(context, deadline, opts.source, opts.entryPath);
+    invoker = await evaluateValue(context, budget, PRELUDE, "capsule:prelude");
+    await evaluate(context, budget, opts.source, opts.entryPath);
 
     const key = `__capsule_invoke_${randomUUID().replaceAll("-", "")}`;
     context.setProp(context.global, key, invoker);
@@ -226,7 +250,14 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
     if (!named) {
       throw new CapsuleError("E_GUEST", "the capsule made its global object unwritable", { tool: opts.tool });
     }
-    return unwrap(await evaluate(context, deadline, invocation(key), "capsule:invoke"), opts.tool);
+    const value = unwrap(await evaluate(context, budget, invocation(key), "capsule:invoke"), opts.tool);
+    // The last word on the budget. A tool that caught the timeout it was handed — or one whose
+    // effects only overran on the way back from the final call — returned a value the caller must not
+    // be given: it was produced outside the time it was allowed.
+    if (expired(budget)) {
+      throw new CapsuleError("E_TIMEOUT", TIMED_OUT.message);
+    }
+    return value;
   } finally {
     invoker?.dispose();
     context.dispose();

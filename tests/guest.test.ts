@@ -380,6 +380,71 @@ test("an unknown tool name fails", async () => {
   await assert.rejects(() => run(`1 + 1;`), capsuleError("E_GUEST", /^tool not implemented: greet$/));
 });
 
+test("a name the tool table only inherits is not a tool", async () => {
+  // `tools[name]` is a lookup, not a membership test: every object answers `toString`,
+  // `constructor` and `hasOwnProperty` out of `Object.prototype`. Called as tools they would return
+  // `"[object Object]"`, the constructor and `true` — three tools every capsule silently implements,
+  // and three answers a caller would take for the capsule's own.
+  const source = `globalThis.tools = { greet: () => 1 };`;
+
+  for (const tool of ["toString", "constructor", "hasOwnProperty", "valueOf"]) {
+    await assert.rejects(
+      () => run(source, { tool }),
+      capsuleError("E_GUEST", new RegExp(`^tool not implemented: ${tool}$`)),
+      `inherited ${tool} was answered as a tool`,
+    );
+  }
+
+  // A tool the capsule wrote itself is still found when it shares a name with a prototype member.
+  assert.deepEqual(await run(`globalThis.tools = { toString: () => ({ ran: "own" }) };`, { tool: "toString" }), {
+    ran: "own",
+  });
+});
+
+test("time spent inside an effect counts against timeout_ms", async () => {
+  // The interrupt handler only runs while the interpreter does. An effect suspends it — the host is
+  // awaiting a promise and the guest is frozen mid-call — so a tool that waits on slow effects burns
+  // wall clock no interrupt can see, and without a check on the way back a 200 ms budget covers
+  // however long the host took.
+  const slow: EffectDispatch = async (_tool, op) => {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    return op === "clock.now" ? CLOCK : true;
+  };
+  const ticks = `for (let i = 0; i < 4; i++)`;
+
+  // A tool that swallows the error it is handed is still a tool that ran too long.
+  await assert.rejects(
+    () =>
+      run(
+        `globalThis.tools = {
+           greet: () => { ${ticks} { try { capsule.log("tick " + i); } catch (e) {} } return { ok: true }; },
+         };`,
+        { dispatch: slow, runtime: { timeout_ms: 200 } },
+      ),
+    capsuleError("E_TIMEOUT", /^tool exceeded timeout_ms$/),
+  );
+
+  // And a tool that lets it through is the same timeout, not a guest error carrying its text.
+  await assert.rejects(
+    () =>
+      run(`globalThis.tools = { greet: () => { ${ticks} capsule.log("tick " + i); return { ok: true }; } };`, {
+        dispatch: slow,
+        runtime: { timeout_ms: 200 },
+      }),
+    capsuleError("E_TIMEOUT", /^tool exceeded timeout_ms$/),
+  );
+
+  // The same slow port inside the budget is an ordinary run: the deadline is what failed the calls
+  // above, not the effects being slower than the host.
+  assert.deepEqual(
+    await run(`globalThis.tools = { greet: () => ({ ok: capsule.now() }) };`, {
+      dispatch: slow,
+      runtime: { timeout_ms: 5000 },
+    }),
+    { ok: CLOCK },
+  );
+});
+
 test("a tool result that is not JSON is rejected", async () => {
   await assert.rejects(
     () => run(`globalThis.tools = { greet: () => () => 1 };`),
