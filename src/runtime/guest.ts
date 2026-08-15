@@ -19,24 +19,13 @@ export type RunGuestOptions = {
 };
 
 /**
- * The call itself. `__tool` and `__args` are read from globals the host set, never spliced into this
- * source: a tool name or an argument that happened to be JavaScript could otherwise rewrite the
- * call. The result comes back as an envelope — a status plus the already-serialised value — so the
- * three outcomes the host must tell apart (no such tool, a value that will not serialise, a value)
- * cannot be confused with a tool that legitimately returned a string.
+ * Triggering the call the prelude prepared. `this` at the top of an evaluated script is the guest's
+ * global object — a keyword, so no declaration the capsule made can shadow it — and the invoker is a
+ * non-writable, non-configurable property installed before the capsule ran, so this reaches the
+ * host's invoker or nothing at all. Nothing else is looked up by name: an identifier here would be a
+ * binding the capsule's own top-level `let` or `const` could have taken over.
  */
-const INVOKE = `(() => {
-  const fn = globalThis.tools && globalThis.tools[__tool];
-  if (typeof fn !== "function") return JSON.stringify({ status: "no_tool" });
-  const value = fn(JSON.parse(__args)) ?? null;
-  let json;
-  try {
-    json = JSON.stringify(value);
-  } catch (e) {
-    return JSON.stringify({ status: "not_json" });
-  }
-  return typeof json === "string" ? JSON.stringify({ status: "ok", json }) : JSON.stringify({ status: "not_json" });
-})()`;
+const INVOKE = `this.__capsule_invoke()`;
 
 /**
  * The host side of the guest ABI. It must never reject: a rejected promise inside an asyncified call
@@ -106,17 +95,56 @@ async function evaluate(
   );
 }
 
-function unwrap(envelope: string | undefined, tool: string): unknown {
-  const outcome =
-    envelope === undefined ? { status: "no_result" } : (JSON.parse(envelope) as { status: string; json?: string });
+/**
+ * The one gate on `args`: they must survive the trip through JSON. Both ways that can fail — a value
+ * `JSON.stringify` refuses to represent, and a value it throws on (a cycle, a BigInt) — are the same
+ * usage error, so a caller never sees a raw host `TypeError` from inside the runtime.
+ */
+function serialiseArgs(args: unknown, tool: string): string {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(args ?? null);
+  } catch {
+    json = undefined;
+  }
+  if (typeof json !== "string") {
+    throw new CapsuleError("E_USAGE", "tool args must be JSON-serialisable", { tool });
+  }
+  return json;
+}
 
-  if (outcome.status === "no_tool") {
+/** JSON the guest may have had a hand in: an unparseable answer is an answer, not a host throw. */
+function reparse(text: string | undefined): unknown {
+  if (text === undefined) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Reads the invoke envelope. The prelude builds it with the real serialiser, but a capsule can still
+ * bend the result from a distance — a `toJSON` on `Object.prototype` is honoured by that serialiser —
+ * so every shape the host does not recognise, parse failures included, is one guest error.
+ */
+function unwrap(envelope: string | undefined, tool: string): unknown {
+  const outcome = reparse(envelope);
+  const fields =
+    typeof outcome === "object" && outcome !== null ? (outcome as { status?: unknown; json?: unknown }) : {};
+
+  if (fields.status === "no_tool") {
     throw new CapsuleError("E_GUEST", `tool not implemented: ${tool}`, { tool });
   }
-  if (outcome.status !== "ok" || typeof outcome.json !== "string") {
+  if (fields.status !== "ok" || typeof fields.json !== "string") {
     throw new CapsuleError("E_GUEST", "tool returned a non-JSON value", { tool });
   }
-  return JSON.parse(outcome.json);
+  // The serialiser never writes the text `undefined`, so nothing but a parse failure lands here.
+  const value = reparse(fields.json);
+  if (value === undefined) {
+    throw new CapsuleError("E_GUEST", "tool returned a non-JSON value", { tool });
+  }
+  return value;
 }
 
 /**
@@ -131,10 +159,7 @@ function unwrap(envelope: string | undefined, tool: string): unknown {
  * runtime's callbacks are gone, which aborts the process.
  */
 export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
-  const argsJson = JSON.stringify(opts.args ?? null);
-  if (typeof argsJson !== "string") {
-    throw new CapsuleError("E_USAGE", "tool args must be JSON-serialisable", { tool: opts.tool });
-  }
+  const argsJson = serialiseArgs(opts.args, opts.tool);
 
   const deadline = Date.now() + opts.runtime.timeout_ms;
   const module = await newQuickJSAsyncWASMModule();
@@ -151,18 +176,20 @@ export async function runGuest(opts: RunGuestOptions): Promise<unknown> {
       handle.dispose();
     };
 
+    // Everything the host hands over goes in before the prelude, which is before any capsule code:
+    // the guest's global object is only the host's to write while nothing of the guest's has run, and
+    // the prelude takes all three into its closure and deletes them.
     setGlobal(
       "__capsule",
       context.newAsyncifiedFunction("__capsule", async (payload) =>
         context.newString(await answer(opts, context.getString(payload))),
       ),
     );
+    setGlobal("__tool", context.newString(opts.tool));
+    setGlobal("__args", context.newString(argsJson));
 
     await evaluate(context, deadline, PRELUDE, "capsule:prelude");
     await evaluate(context, deadline, opts.source, opts.entryPath);
-
-    setGlobal("__tool", context.newString(opts.tool));
-    setGlobal("__args", context.newString(argsJson));
 
     return unwrap(await evaluate(context, deadline, INVOKE, "capsule:invoke"), opts.tool);
   } finally {

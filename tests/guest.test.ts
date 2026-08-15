@@ -204,6 +204,68 @@ test("a tool result that is not JSON is rejected", async () => {
   );
 });
 
+test("args that cannot be serialised are refused before the guest runs", async () => {
+  const source = `globalThis.tools = { greet: () => 1 };`;
+  const refused = capsuleError("E_USAGE", /^tool args must be JSON-serialisable$/);
+  const cycle: { self?: unknown } = {};
+  cycle.self = cycle;
+
+  // The two ways JSON.stringify fails — it throws, or it answers with no string at all — are the
+  // same usage error, never a host TypeError reaching the caller.
+  await assert.rejects(() => run(source, { args: cycle }), refused);
+  await assert.rejects(() => run(source, { args: { big: 1n } }), refused);
+  await assert.rejects(() => run(source, { args: () => 1 }), refused);
+});
+
+test("a guest that replaces JSON cannot break the call", async () => {
+  // The ABI captured the real serialiser before the capsule ran, so poisoning the guest's own copy
+  // changes nothing about the envelope the host reads back.
+  const value = await run(
+    `JSON.stringify = () => "not json at all";
+     JSON.parse = () => { throw new Error("poisoned"); };
+     globalThis.tools = { greet: (args) => ({ echo: args.name }) };`,
+    { args: { name: "ada" } },
+  );
+
+  assert.deepEqual(value, { echo: "ada" });
+
+  // An envelope the guest bends by other means — a `toJSON` on Object.prototype, which the real
+  // serialiser does honour — is still one CapsuleError rather than a host parse throw.
+  await assert.rejects(
+    () =>
+      run(
+        `Object.prototype.toJSON = () => null;
+         globalThis.tools = { greet: () => ({ ok: 1 }) };`,
+      ),
+    capsuleError("E_GUEST", /^tool returned a non-JSON value$/),
+  );
+});
+
+test("a guest cannot hijack the call through globals", async () => {
+  // Every vector the guest has over the invocation: pre-defining the host's globals so a later write
+  // is silently dropped, and replacing or deleting the invoker itself.
+  const source = `Object.defineProperty(globalThis, "__tool", { value: "other", writable: false, configurable: false });
+    Object.defineProperty(globalThis, "__args", { value: '{"name":"evil"}', writable: false, configurable: false });
+    globalThis.__capsule_invoke = () => JSON.stringify({ status: "ok", json: '{"ran":"hijacked"}' });
+    delete globalThis.__capsule_invoke;
+    globalThis.tools = {
+      greet: (args) => ({ ran: "greet", name: args.name }),
+      other: () => ({ ran: "other" }),
+    };`;
+
+  assert.deepEqual(await run(source, { tool: "greet", args: { name: "ada" } }), { ran: "greet", name: "ada" });
+
+  // A declaration is the other half of the same trick: a global `let` shadows the property of the
+  // same name for every script that runs afterwards. The call reaches the real global object anyway.
+  assert.deepEqual(
+    await run(
+      `this.tools = { greet: () => ({ ran: "greet" }) };
+       let globalThis = { tools: { greet: () => ({ ran: "shadowed" }) } };`,
+    ),
+    { ran: "greet" },
+  );
+});
+
 test("an effect error reaches the guest as a catchable error", async () => {
   const value = await run(
     `globalThis.tools = {
