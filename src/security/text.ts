@@ -84,17 +84,33 @@ export function confusableSkeleton(s: string): string {
   return normalized.replace(HOMOGLYPH_PATTERN, (ch) => HOMOGLYPH_MAP[ch] ?? ch);
 }
 
-// The whole text is scanned, so the gap-matching spans inside a pattern are
-// bounded (120 chars — more than any real marker phrase puts between its
-// tokens). Unbounded `[^|]*` / `.*` spans backtrack quadratically: 300k chars
-// of "cur"+"l " took 11.7s; bounded at 120 the same input takes ~19ms.
-const INJECTION_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
-  ["ignore_previous", /ignore\s+(all\s+)?(previous|prior|above)/i],
-  ["system_prompt", /system\s*prompt|<\s*system\s*>/i],
-  ["conceal", /do not (tell|mention|inform)|without (telling|informing)/i],
-  ["credential_path", /\.ssh|id_[rd]sa|\/etc\/shadow|\.env\b|credentials\.json/i],
-  ["exfil", /curl\s[^|]{0,120}\|\s*(sh|bash)|base64\s+-d|\bwebhook\b.{0,120}\bpost\b/i],
-  ["tool_directive", /\bbefore using this tool\b|\balways call\b.{0,120}\bfirst\b/i],
+// Multi-token markers are matched as two independent single-token searches
+// instead of one `token1.*token2` regex: an unbounded gap span backtracks
+// quadratically (300k chars of "cur"+"l " took 11.7s), while two linear scans
+// plus a slice stay O(N) *and* detect tokens any distance apart.
+function orderedTokens(t: string, first: RegExp, second: RegExp): boolean {
+  const m = first.exec(t);
+  return m !== null && second.test(t.slice(m.index + m[0].length));
+}
+
+const INJECTION_PATTERNS: ReadonlyArray<readonly [string, (t: string) => boolean]> = [
+  ["ignore_previous", (t) => /ignore\s+(all\s+)?(previous|prior|above)/i.test(t)],
+  ["system_prompt", (t) => /system\s*prompt|<\s*system\s*>/i.test(t)],
+  ["conceal", (t) => /do not (tell|mention|inform)|without (telling|informing)/i.test(t)],
+  ["credential_path", (t) => /\.ssh|id_[rd]sa|\/etc\/shadow|\.env\b|credentials\.json/i.test(t)],
+  [
+    "exfil",
+    (t) =>
+      orderedTokens(t, /curl\s/i, /\|\s*(sh|bash)\b/i) ||
+      /base64\s+-d/i.test(t) ||
+      orderedTokens(t, /\bwebhook\b/i, /\bpost\b/i),
+  ],
+  [
+    "tool_directive",
+    (t) =>
+      /\bbefore using this tool\b/i.test(t) ||
+      orderedTokens(t, /\balways call\b/i, /\bfirst\b/i),
+  ],
 ];
 
 export function scanForInjection(s: string): string[] {
@@ -104,8 +120,8 @@ export function scanForInjection(s: string): string[] {
     }
     const clean = confusableSkeleton(sanitizeModelText(s));
     const matched: string[] = [];
-    for (const [name, regex] of INJECTION_PATTERNS) {
-      if (regex.test(clean)) {
+    for (const [name, matches] of INJECTION_PATTERNS) {
+      if (matches(clean)) {
         matched.push(name);
       }
     }
