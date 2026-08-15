@@ -3,6 +3,7 @@ import { VERSION_LINE } from "./version.ts";
 import { CapsuleError } from "./core/errors.ts";
 import { probeSqliteSupport } from "./core/probe.ts";
 import { conformanceCommand } from "./commands/conformance.ts";
+import { exportMcpbCommand } from "./commands/export-mcpb.ts";
 import { exportPluginCommand } from "./commands/export-plugin.ts";
 import { injectCommand } from "./commands/inject.ts";
 import { installHandlerCommand } from "./commands/install-handler.ts";
@@ -26,6 +27,7 @@ const COMMANDS = new Map<string, Command>([
   ["inject", injectCommand],
   ["install-handler", installHandlerCommand],
   ["export-plugin", exportPluginCommand],
+  ["export-mcpb", exportMcpbCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]

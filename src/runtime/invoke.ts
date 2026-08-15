@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import type { SchemaObject, ValidateFunction } from "ajv/dist/2020.js";
 import { digestOf } from "../core/digest.ts";
 import { CapsuleError } from "../core/errors.ts";
 import { newValidator } from "../core/schema.ts";
 import type { LoadedCapsule } from "../format/capsule.ts";
 import type { GrantsStore } from "../security/grants.ts";
+import { capsuleHome } from "../security/signing.ts";
 import { sanitizeModelText, sanitizeValue } from "../security/text.ts";
 import { createEffects, type EffectsController } from "./effects.ts";
 import { createFetchPort, type FetchInit } from "./fetch.ts";
@@ -55,6 +57,19 @@ export type InvokeOptions = {
  */
 export function sidecarPaths(file: string): { app: string; journal: string } {
   return { app: `${file}.app.sqlite`, journal: `${file}.journal.sqlite` };
+}
+
+/**
+ * Where a capsule's two databases live when stored globally under CAPSULE_HOME/state/,
+ * content-addressed by capsuleId.
+ */
+export function homeSidecarPaths(capsuleId: string, homeDir: string = capsuleHome()): { app: string; journal: string } {
+  const safeId = capsuleId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const stateDir = join(homeDir, "state");
+  return {
+    app: join(stateDir, `${safeId}.app.sqlite`),
+    journal: join(stateDir, `${safeId}.journal.sqlite`),
+  };
 }
 
 /**

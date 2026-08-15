@@ -2,9 +2,10 @@ import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
 import { createMcpServer } from "../mcp/server.ts";
 import { createStdioTransport } from "../mcp/transport.ts";
+import { homeSidecarPaths } from "../runtime/invoke.ts";
 
 const USAGE =
-  "usage: capsule mcp <file> [--state <path>] [--journal <path>] [--accept-drift] [--allow-suspicious]";
+  "usage: capsule mcp <file> [--state <path>] [--journal <path>] [--state-home] [--accept-drift] [--allow-suspicious]";
 
 function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
@@ -14,6 +15,7 @@ export async function mcpCommand(argv: string[]): Promise<number> {
   let file: string | undefined;
   let statePath: string | undefined;
   let journalPath: string | undefined;
+  let stateHome = false;
   let acceptDrift = false;
   let allowSuspicious = false;
 
@@ -26,6 +28,8 @@ export async function mcpCommand(argv: string[]): Promise<number> {
       statePath = valueOf(arg, argv[++i]);
     } else if (arg === "--journal") {
       journalPath = valueOf(arg, argv[++i]);
+    } else if (arg === "--state-home") {
+      stateHome = true;
     } else if (arg === "--accept-drift") {
       acceptDrift = true;
     } else if (arg === "--allow-suspicious") {
@@ -49,6 +53,12 @@ export async function mcpCommand(argv: string[]): Promise<number> {
   } catch (e) {
     if (e instanceof CapsuleError) throw e;
     throw new CapsuleError("E_CONTAINER", e instanceof Error ? e.message : String(e), { file });
+  }
+
+  if (stateHome) {
+    const homePaths = homeSidecarPaths(capsule.capsuleId);
+    statePath = statePath ?? homePaths.app;
+    journalPath = journalPath ?? homePaths.journal;
   }
 
   const server = createMcpServer({

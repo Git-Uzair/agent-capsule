@@ -14,7 +14,8 @@
     "schema",
     "README.md",
     "docs/SPEC.md",
-    "templates"
+    "templates",
+    "assets"
   ],
   "scripts": {
     "build": "node scripts/build.js",

@@ -1,0 +1,224 @@
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
+import { ZipFile } from "yazl";
+import { CapsuleError } from "../core/errors.ts";
+import { loadCapsule } from "../format/capsule.ts";
+import { sanitizeModelText } from "../security/text.ts";
+
+const USAGE = "usage: capsule export-mcpb <file> [-o <out.mcpb>]";
+const EPOCH = new Date(1980, 0, 1);
+
+function usage(message: string): never {
+  throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
+}
+
+export type McpbEntry = { path: string; data: Uint8Array | Buffer };
+
+export function getDistRuntimePaths(customDistDir?: string): { cliJs: string; wasm: string } {
+  if (customDistDir) {
+    const cliJs = resolve(customDistDir, "cli.js");
+    const wasm = resolve(customDistDir, "emscripten-module.wasm");
+    if (existsSync(cliJs) && existsSync(wasm)) {
+      return { cliJs, wasm };
+    }
+    throw new CapsuleError("E_CONTAINER", `dist runtime bundle not found in ${customDistDir}`);
+  }
+
+  // If running in dist/
+  const besideCli = resolve(import.meta.dirname, "cli.js");
+  const besideWasm = resolve(import.meta.dirname, "emscripten-module.wasm");
+  if (existsSync(besideCli) && existsSync(besideWasm)) {
+    return { cliJs: besideCli, wasm: besideWasm };
+  }
+
+  // If running from src/commands/
+  const rootDistCli = resolve(import.meta.dirname, "..", "..", "dist", "cli.js");
+  const rootDistWasm = resolve(import.meta.dirname, "..", "..", "dist", "emscripten-module.wasm");
+  if (existsSync(rootDistCli) && existsSync(rootDistWasm)) {
+    return { cliJs: rootDistCli, wasm: rootDistWasm };
+  }
+
+  const parentDistCli = resolve(import.meta.dirname, "..", "dist", "cli.js");
+  const parentDistWasm = resolve(import.meta.dirname, "..", "dist", "emscripten-module.wasm");
+  if (existsSync(parentDistCli) && existsSync(parentDistWasm)) {
+    return { cliJs: parentDistCli, wasm: parentDistWasm };
+  }
+
+  throw new CapsuleError("E_CONTAINER", "dist runtime bundle not found (run npm run build first)");
+}
+
+export function getDefaultIconPath(customIconPath?: string): string {
+  if (customIconPath) {
+    if (existsSync(customIconPath)) return customIconPath;
+    throw new CapsuleError("E_CONTAINER", `icon file not found at ${customIconPath}`);
+  }
+
+  const beside = resolve(import.meta.dirname, "icon.png");
+  if (existsSync(beside)) return beside;
+
+  const besideAssets = resolve(import.meta.dirname, "assets", "icon.png");
+  if (existsSync(besideAssets)) return besideAssets;
+
+  const rootAssets = resolve(import.meta.dirname, "..", "..", "assets", "icon.png");
+  if (existsSync(rootAssets)) return rootAssets;
+
+  const parentAssets = resolve(import.meta.dirname, "..", "assets", "icon.png");
+  if (existsSync(parentAssets)) return parentAssets;
+
+  throw new CapsuleError("E_CONTAINER", "default icon.png not found");
+}
+
+export async function packMcpb(entries: McpbEntry[]): Promise<Buffer> {
+  const zip = new ZipFile();
+  const sorted = [...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const entry of sorted) {
+    const buf = Buffer.isBuffer(entry.data)
+      ? entry.data
+      : Buffer.from(entry.data.buffer, entry.data.byteOffset, entry.data.byteLength);
+    zip.addBuffer(buf, entry.path, {
+      mtime: EPOCH,
+      mode: 0o100644,
+      compress: true,
+      forceDosTimestamp: true,
+    });
+  }
+  zip.end();
+  const chunks: Buffer[] = [];
+  for await (const chunk of zip.outputStream as AsyncIterable<Buffer>) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+export async function exportMcpb(
+  capsulePath: string,
+  outPath?: string,
+  opts?: { distDir?: string; iconPath?: string },
+): Promise<string> {
+  if (!existsSync(capsulePath)) {
+    throw new CapsuleError("E_USAGE", "capsule file does not exist", { path: capsulePath });
+  }
+  if (statSync(capsulePath).isDirectory()) {
+    throw new CapsuleError("E_USAGE", "capsule path is a directory", { path: capsulePath });
+  }
+
+  // Load and cryptographically verify the capsule container, digests, and signature (trust=false avoids TOFU writes during packaging)
+  const loaded = await loadCapsule(capsulePath, { trust: false });
+  const manifest = loaded.manifest;
+
+  const baseName = basename(capsulePath);
+  const capsuleFileName = baseName.endsWith(".capsule")
+    ? baseName
+    : `${manifest.meta.name}-${manifest.meta.version}.capsule`;
+
+  const runtimePaths = getDistRuntimePaths(opts?.distDir);
+  const iconPath = getDefaultIconPath(opts?.iconPath);
+
+  const cliJsData = readFileSync(runtimePaths.cliJs);
+  const wasmData = readFileSync(runtimePaths.wasm);
+  const iconData = readFileSync(iconPath);
+  const capsuleData = loaded.bytes;
+
+  const manifestJson = {
+    manifest_version: "0.2",
+    name: sanitizeModelText(manifest.meta.name),
+    version: manifest.meta.version,
+    description: sanitizeModelText(manifest.meta.description || manifest.meta.title || manifest.meta.name),
+    author: manifest.meta.author?.name
+      ? { name: sanitizeModelText(manifest.meta.author.name) }
+      : { name: "Agent Capsule" },
+    icon: "icon.png",
+    server: {
+      type: "node",
+      entry_point: "server/cli.js",
+      mcp_config: {
+        command: "node",
+        args: [
+          "${__dirname}/server/cli.js",
+          "mcp",
+          `\${__dirname}/payload/${capsuleFileName}`,
+          "--state-home",
+        ],
+        env: {},
+      },
+    },
+  };
+
+  const packageJson = {
+    type: "module",
+    engines: {
+      node: ">=22.13.0",
+    },
+  };
+
+  const entries: McpbEntry[] = [
+    {
+      path: "manifest.json",
+      data: Buffer.from(JSON.stringify(manifestJson, null, 2) + "\n", "utf8"),
+    },
+    {
+      path: "server/cli.js",
+      data: cliJsData,
+    },
+    {
+      path: "server/emscripten-module.wasm",
+      data: wasmData,
+    },
+    {
+      path: `payload/${capsuleFileName}`,
+      data: capsuleData,
+    },
+    {
+      path: "package.json",
+      data: Buffer.from(JSON.stringify(packageJson, null, 2) + "\n", "utf8"),
+    },
+    {
+      path: "icon.png",
+      data: iconData,
+    },
+  ];
+
+  const zipBytes = await packMcpb(entries);
+
+  let targetOut = outPath;
+  if (!targetOut) {
+    targetOut = capsulePath.endsWith(".capsule")
+      ? capsulePath.slice(0, -".capsule".length) + ".mcpb"
+      : `${capsulePath}.mcpb`;
+  }
+
+  mkdirSync(dirname(resolve(targetOut)), { recursive: true });
+  writeFileSync(targetOut, zipBytes);
+
+  return targetOut;
+}
+
+export async function runExportMcpb(argv: string[]): Promise<number> {
+  let file: string | undefined;
+  let out: string | undefined;
+
+  const valueOf = (arg: string, next: string | undefined): string =>
+    next === undefined ? usage(`${arg} needs a value`) : next;
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i] as string;
+    if (arg === "-o" || arg === "--out") {
+      out = valueOf(arg, argv[++i]);
+    } else if (arg.startsWith("-")) {
+      usage(`unknown option: ${arg}`);
+    } else if (file === undefined) {
+      file = arg;
+    } else {
+      usage(`unexpected argument: ${arg}`);
+    }
+  }
+
+  if (file === undefined) {
+    usage("missing capsule file");
+  }
+
+  await exportMcpb(file, out);
+  return 0;
+}
+
+export const exportMcpbCommand = runExportMcpb;

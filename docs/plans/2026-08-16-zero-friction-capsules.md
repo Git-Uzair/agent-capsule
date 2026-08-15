@@ -77,10 +77,11 @@ These facts were established by direct inspection on 2026-08-15/16; the plan's d
 Work top to bottom; each phase is releasable on its own. Keep the existing test suite green (326 tests as of `0a19bac`) and add tests as specified. Follow the repo's comment style (rationale-bearing, no narration).
 
 ### P0 — Build & packaging foundation
-Status: in_progress
+Status: completed
 Failed verify cycles: 1
 Attempt ledger:
 - attempt 1: initial P0 implementation -> FAIL (install-handler pointing to src/cli.ts instead of dist/cli.js, package-lock.json out of sync, root engines split)
+- attempt 2: resolve default CLI path dynamically to dist/cli.js, sync package-lock.json, set root package.json engines >=24.0.0 and document bundle split in build script -> PASS
 
 
 **P0-1. esbuild bundling.**
@@ -103,6 +104,10 @@ Attempt ledger:
 - Acceptance: `npm pack` tarball, installed globally into a scratch prefix, exposes working `capsule` on PATH.
 
 ### P1 — One-file sharing: `capsule export-mcpb` (fastest visible win)
+Status: completed
+Failed verify cycles: 0
+Attempt ledger:
+- attempt 1: implement export-mcpb, default icon asset, sidecar home path resolution with --state-home, tampered verification tests, and spec §7 doc update -> PASS
 
 **P1-1. The exporter.**
 - New command: `capsule export-mcpb <file.capsule> [-o out.mcpb]` in `src/commands/export-mcpb.ts`, registered in `src/cli.ts`.

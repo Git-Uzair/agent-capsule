@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, copyFileSync, chmodSync } from "node:fs";
+import { mkdirSync, copyFileSync, chmodSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -80,10 +80,16 @@ const wasmDestPath = resolve(distDir, "emscripten-module.wasm");
 
 copyFileSync(wasmSourcePath, wasmDestPath);
 
+// Copy default icon asset if present
+const iconSourcePath = resolve(rootDir, "assets", "icon.png");
+if (existsSync(iconSourcePath)) {
+  copyFileSync(iconSourcePath, resolve(distDir, "icon.png"));
+}
+
 try {
   chmodSync(resolve(distDir, "cli.js"), 0o755);
 } catch {
   // Ignored on platforms (e.g. Windows) where chmodSync is a no-op or has different permission models
 }
 
-console.log("Build complete: dist/cli.js + dist/emscripten-module.wasm");
+console.log("Build complete: dist/cli.js + dist/emscripten-module.wasm + dist/icon.png");

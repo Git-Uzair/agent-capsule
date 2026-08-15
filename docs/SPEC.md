@@ -563,6 +563,10 @@ When a capsule defines `ui.app`:
 | `capsule_runs` | `{ limit?: integer }` | Query recent execution runs from the journal sidecar, newest first (limit: 1–50, default: 10). |
 | `capsule_replay` | `{ runId: string }` | Replay a recorded run to verify deterministic execution. |
 
+### 7.6 Extension Delivery & Verification (`.mcpb`)
+
+MCPB delivery does not bypass verification: packaging a capsule inside an `.mcpb` bundle provides zero-friction double-click installation for client runtimes such as Claude Desktop, but execution remains strictly gated by first-run cryptographic verification. When the client launches the MCP server entry point, `loadCapsule` executes before the transport is established, validating Ed25519 signatures, statement digests, subject bindings, and establishing Trust-On-First-Use (TOFU) key pinning in `$CAPSULE_HOME/trust.json`. Any tampered, unverified, or key-drifted capsule is refused on `stderr` without emitting JSON-RPC lines on `stdout`.
+
 ---
 
 ## 8. Conformance Vectors (C01–C12)
