@@ -1,7 +1,13 @@
 import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { EffectName, Manifest } from "../format/manifest.ts";
-import { confusableSkeleton, sanitizeModelText, sanitizeValue, scanTextTree } from "../security/text.ts";
+import {
+  confusableSkeleton,
+  sanitizeModelText,
+  sanitizeValue,
+  scanTextTree,
+  stringLeaves,
+} from "../security/text.ts";
 
 /**
  * A tool as an agent sees it: every piece of prose already sanitised, the declared effects attached
@@ -39,13 +45,24 @@ export function assertNoToolNameCollision(names: readonly string[]): void {
 }
 
 /**
- * The identifiers of a JSON Schema: every object key, plus every entry of a `required` array, since
- * those name properties too. Identifiers are the one part of a schema that cannot be cleaned —
- * rewriting one would ask the model for a field the guest never reads, and rewriting a `required`
- * entry without its key would leave the schema demanding a property that `properties` does not
- * declare. So an identifier carrying hidden text is answered by suppressing the whole tool instead,
- * and the identifiers of a tool that *is* served are already their own sanitised form, which is what
- * makes cleaning the schema unable to break the two apart.
+ * The keywords a JSON Schema validator matches *literally* against an argument. The guest's own
+ * validator runs on the raw schema out of the signed manifest, so anything served here that differs
+ * from the raw bytes is a contract the model is asked to satisfy and the guest then rejects: a
+ * cleaned `enum` advertises a value that fails validation, and a cleaned `required` entry demands a
+ * property whose key — keys are never rewritten — the schema does not declare.
+ */
+const LITERAL_KEYWORDS = new Set(["required", "enum", "const", "pattern"]);
+
+/** Keywords whose value maps a *name* to a subschema, so its keys are names, not keywords. */
+const SCHEMA_MAPS = new Set(["properties", "patternProperties", "$defs", "definitions"]);
+
+/**
+ * The identifiers of a JSON Schema: every object key at every depth, plus every string inside a
+ * literally matched keyword (`required` names properties, `enum`/`const`/`pattern` name accepted
+ * values). Those are the parts of a schema that cannot be cleaned — see `LITERAL_KEYWORDS` — so an
+ * identifier carrying hidden text is answered by suppressing the whole tool instead, and the
+ * identifiers of a tool that *is* served are already their own sanitised form, which is what makes
+ * serving them verbatim safe.
  *
  * The offending identifier is deliberately not reported: it holds the escape sequences this exists to
  * catch, and the warning is written to somebody's terminal.
@@ -58,13 +75,43 @@ function hasUnsafeIdentifier(value: unknown): boolean {
   if (record === undefined) {
     return false;
   }
-  const required = record["required"];
-  if (Array.isArray(required)) {
-    if (required.some((name) => typeof name === "string" && name !== sanitizeModelText(name))) {
+  for (const [key, v] of Object.entries(record)) {
+    if (key !== sanitizeModelText(key)) {
+      return true;
+    }
+    const unsafe = LITERAL_KEYWORDS.has(key)
+      ? stringLeaves(v).some((leaf) => leaf !== sanitizeModelText(leaf))
+      : hasUnsafeIdentifier(v);
+    if (unsafe) {
       return true;
     }
   }
-  return Object.entries(record).some(([key, v]) => key !== sanitizeModelText(key) || hasUnsafeIdentifier(v));
+  return false;
+}
+
+/**
+ * A schema with its prose cleaned and its literally matched slots left exactly as the manifest wrote
+ * them: `title`, `description` and every other string are model-facing text and go through
+ * `sanitizeModelText`; the value of a `LITERAL_KEYWORDS` keyword is copied through untouched.
+ *
+ * `keysAreNames` is what keeps the two apart inside a `SCHEMA_MAPS` value: a property may legitimately
+ * be *called* `enum`, and its subschema's prose still has to be cleaned.
+ */
+function sanitizeSchemaProse(value: unknown, keysAreNames = false): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeSchemaProse(item));
+  }
+  const record = asRecord(value);
+  if (record === undefined) {
+    return sanitizeValue(value);
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, v]) =>
+      !keysAreNames && LITERAL_KEYWORDS.has(key)
+        ? [key, v]
+        : [key, sanitizeSchemaProse(v, !keysAreNames && SCHEMA_MAPS.has(key))],
+    ),
+  );
 }
 
 /**
@@ -80,16 +127,16 @@ export function buildToolList(
   for (const tool of manifest.tools) {
     const title = sanitizeModelText(tool.title);
     const description = sanitizeModelText(tool.description);
-    const inputSchema = sanitizeValue(tool.inputSchema) as Record<string, unknown>;
+    const inputSchema = sanitizeSchemaProse(tool.inputSchema) as Record<string, unknown>;
     const outputSchema =
       tool.outputSchema === undefined
         ? undefined
-        : (sanitizeValue(tool.outputSchema) as Record<string, unknown>);
+        : (sanitizeSchemaProse(tool.outputSchema) as Record<string, unknown>);
 
     // Screened after sanitising, because what reaches the model is the sanitised text: a marker that
     // only survives in the raw string is not a marker the model would ever have seen. Schema keys are
-    // part of that text — `scanTextTree` walks them — but they are screened on the *raw* schema,
-    // since sanitising is what a clean identifier has to survive unchanged.
+    // part of that text — `scanTextTree` walks them — but identifiers are screened on the *raw*
+    // schema, since they are served verbatim and so sanitising is what a clean one has to survive.
     const markers = scanTextTree([title, description, inputSchema, outputSchema]);
     if (hasUnsafeIdentifier(tool.inputSchema) || hasUnsafeIdentifier(tool.outputSchema)) {
       markers.push("unsafe_schema_identifier");

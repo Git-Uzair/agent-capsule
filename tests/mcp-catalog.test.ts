@@ -348,6 +348,16 @@ test("tools/list omits a tool whose schema identifiers carry hidden characters u
       "zero-width required entry",
       { type: "object", properties: { name: { type: "string" } }, required: ["na\u200bme"] },
     ],
+    // `enum` and `const` are matched against the argument literally, so they are identifiers too:
+    // cleaning one would advertise a value the guest's own validator then rejects.
+    [
+      "zero-width enum item",
+      { type: "object", properties: { name: { type: "string", enum: ["h\u200bi"] } } },
+    ],
+    [
+      "zero-width const",
+      { type: "object", properties: { name: { const: "h\u200bi" } } },
+    ],
   ];
 
   for (const [label, inputSchema] of cases) {
@@ -394,6 +404,46 @@ test("tools/list keeps required entries and property keys consistent", async () 
 
     assert.deepEqual(greet.inputSchema["required"], ["name"]);
     assert.deepEqual(Object.keys(record(greet.inputSchema["properties"])), ["name"]);
+  });
+});
+
+test("tools/list cleans schema prose and serves literally matched slots verbatim", async () => {
+  await withHome(async (home) => {
+    // `allowSuspicious` serves a tool whose identifiers carry hidden characters, and the guest's
+    // own validator matches an argument against the *raw* schema. So every slot that is matched
+    // literally — a `properties` key, a `required` entry, an `enum` item, a `const` — has to be
+    // served exactly as the manifest wrote it; only the prose around them is cleaned.
+    const capsule = await packCapsule(home, (draft) => {
+      (draft.tools[0] as DraftTool).inputSchema = {
+        type: "object",
+        title: "Greet\u001b[31m input",
+        properties: {
+          "na\u200bme": {
+            type: "string",
+            title: "Na\u200bme",
+            description: "the \u001b[1mname\u001b[0m to greet",
+          },
+          mode: { type: "string", enum: ["h\u200bi", "bye"], description: "Gr\u200beeting" },
+          kind: { const: "fo\u200bo" },
+        },
+        required: ["na\u200bme"],
+      };
+    });
+
+    const greet = toolsOf(
+      await callOk(createMcpServer({ capsule, allowSuspicious: true }), "tools/list"),
+    )[0] as ListedTool;
+
+    const properties = record(greet.inputSchema["properties"]);
+    assert.deepEqual(Object.keys(properties), ["na\u200bme", "mode", "kind"]);
+    assert.deepEqual(greet.inputSchema["required"], ["na\u200bme"]);
+    assert.deepEqual(record(properties["mode"])["enum"], ["h\u200bi", "bye"]);
+    assert.equal(record(properties["kind"])["const"], "fo\u200bo");
+
+    assert.equal(greet.inputSchema["title"], "Greet input");
+    assert.equal(record(properties["na\u200bme"])["title"], "Name");
+    assert.equal(record(properties["na\u200bme"])["description"], "the name to greet");
+    assert.equal(record(properties["mode"])["description"], "Greeting");
   });
 });
 
