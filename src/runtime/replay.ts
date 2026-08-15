@@ -3,6 +3,7 @@ import { digestOf } from "../core/digest.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { LoadedCapsule } from "../format/capsule.ts";
 import { createEffects, type EffectDispatch } from "./effects.ts";
+import { createFetchPort, type FetchInit } from "./fetch.ts";
 import { runGuest } from "./guest.ts";
 import { errorOf, openSidecar, sanitizeValue, sidecarPaths, type InvokeError } from "./invoke.ts";
 import { EVENT, openJournal, type Journal, type JournalEvent } from "./journal.ts";
@@ -168,15 +169,27 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
     const scratchRunId = randomUUID();
     scratch.beginRun({ runId: scratchRunId, capsuleId: capsule.capsuleId, tool, mode: "replay" });
 
+    // Built the way a run builds it, from the grants the user holds now: replaying a tool whose grant
+    // has since been revoked is refused, and says so, rather than quietly reading the recorded answer
+    // back out of a file the user no longer consents to.
+    const policy = buildPolicy({
+      manifest: capsule.manifest,
+      capsuleId: capsule.capsuleId,
+      ...(opts.homeDir === undefined ? {} : { homeDir: opts.homeDir }),
+    });
+    // The egress gate, for the same reason state is opened: an effect the recording shows failing is
+    // re-run for real, and a `net.fetch` re-run in a runtime with no port fails because the port is
+    // missing rather than for the reason the recording holds — which is a divergence the host
+    // manufactured. Built exactly as a recorded run builds it, so the refusal is the same refusal;
+    // nothing reaches a socket that the recording did not already show reaching one.
+    const fetchPort = createFetchPort({
+      policy,
+      tool,
+      allowLocalhost: capsule.manifest.capabilities.net.allow_localhost,
+    });
+
     const effects = createEffects({
-      // Built the way a run builds it, from the grants the user holds now: replaying a tool whose
-      // grant has since been revoked is refused, and says so, rather than quietly reading the
-      // recorded answer back out of a file the user no longer consents to.
-      policy: buildPolicy({
-        manifest: capsule.manifest,
-        capsuleId: capsule.capsuleId,
-        ...(opts.homeDir === undefined ? {} : { homeDir: opts.homeDir }),
-      }),
+      policy,
       journal: scratch,
       runId: scratchRunId,
       tool,
@@ -185,6 +198,9 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayResult> {
       maxRequestedOrdinal,
       recordedRequests,
       state,
+      // The guest's `init` is whatever JSON it built, so it crosses as `unknown`; the port checks
+      // every field of it before any of it can reach a socket.
+      netFetch: (url, init): Promise<unknown> => fetchPort(url, init as FetchInit | undefined),
     });
 
     let divergence: CapsuleError | undefined;

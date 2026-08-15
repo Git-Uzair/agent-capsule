@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { digestOf } from "../src/core/digest.ts";
@@ -11,6 +11,7 @@ import { invokeTool, sidecarPaths, type InvokeResult } from "../src/runtime/invo
 import { EVENT, openJournal } from "../src/runtime/journal.ts";
 import { replayRun, type ReplayResult } from "../src/runtime/replay.ts";
 import { openState } from "../src/runtime/state.ts";
+import { addGrant, loadGrants, saveGrants } from "../src/security/grants.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "hello");
 const CLI = join(import.meta.dirname, "..", "src", "cli.ts");
@@ -512,6 +513,87 @@ test("reports a divergence when the guest asks the same op with different params
     assert.equal(replay.diverged, true);
     assert.equal(replay.error?.code, "E_NONDETERMINISM");
     assert.match(replay.error?.message ?? "", /effect #4 diverged: expected kv\.get\//);
+  });
+});
+
+/** The one host the net-capable fixture below may reach, and the grant that authorises it. */
+const NET_HOST = "api.example.com";
+
+/**
+ * The fixture repacked with `net.fetch` on `greet`, the host declared, and the grant the user would
+ * have given already in the store. The store is the point: `replayRun` builds its policy from the
+ * grants the user holds now, so a grant handed to the recording alone would make the replay a refusal
+ * for a reason that has nothing to do with the effect being re-run.
+ */
+async function packNetFixture(home: string, source: string): Promise<LoadedCapsule> {
+  const dir = join(home, `net-src-${randomUUID()}`);
+  cpSync(FIXTURE, dir, { recursive: true });
+  writeFileSync(join(dir, "src", "main.js"), source);
+  const manifest = JSON.parse(readFileSync(join(FIXTURE, "capsule.json"), "utf8")) as {
+    capabilities: Record<string, unknown>;
+    tools: { effects: string[] }[];
+  };
+  manifest.capabilities.net = { allowed_hosts: [NET_HOST] };
+  manifest.tools = manifest.tools.map((tool) => ({ ...tool, effects: [...tool.effects, "net.fetch"] }));
+  writeFileSync(join(dir, "capsule.json"), JSON.stringify(manifest));
+  const file = join(home, `hello-net-${randomUUID()}.capsule`);
+  await packDirectory(dir, file, { homeDir: home });
+  const capsule = await loadCapsule(file, { homeDir: home });
+  const grants = loadGrants(home);
+  addGrant(grants, capsule.capsuleId, `net:${NET_HOST}`);
+  saveGrants(grants, home);
+  return capsule;
+}
+
+test("replays a recording whose failed gap effect is a net.fetch", async () => {
+  await withHome(async (home) => {
+    // The last thing this guest does is a `PUT`, which the egress port refuses on the way in — before
+    // the policy is asked and before a name is resolved, so the refusal is the same with or without a
+    // network — and it puts the refusal it was handed into its value. The recording therefore ends at a
+    // `net.fetch` gap, and re-running that effect faithfully needs the same port: a replay given none
+    // refuses with "net.fetch is not available in this runtime" instead, which is a different answer to
+    // a different question and a different value.
+    const capsule = await packNetFixture(
+      home,
+      "globalThis.tools = {\n" +
+        "  greet(args) {\n" +
+        '    const seen = Number(capsule.kv.get("greet_count") ?? "0") + 1;\n' +
+        '    capsule.kv.set("greet_count", String(seen));\n' +
+        "    const at = capsule.now();\n" +
+        '    let refusal = "fetched";\n' +
+        `    try {\n      capsule.fetch("https://${NET_HOST}/thing", { method: "PUT" });\n` +
+        '    } catch (e) {\n      refusal = e.code + ": " + e.message;\n    }\n' +
+        '    return { text: "hello " + args.name, at, count: seen, refusal };\n' +
+        "  },\n};\n",
+    );
+    const paths = sidecarPaths(capsule.file);
+    const recorded = await record(capsule, "ada");
+    assert.deepEqual(recorded.value, {
+      text: "hello ada",
+      at: AT,
+      count: 1,
+      refusal: "E_USAGE: net.fetch allows only GET and POST, not PUT",
+    });
+
+    // Four effects asked for and three answered: the gap is the `net.fetch` at #3.
+    const events = eventsOf(paths.journal, recorded.runId);
+    assert.deepEqual(
+      events.filter((e) => e.type === EVENT.effectRequested).map(ordinalOf),
+      [0, 1, 2, 3],
+    );
+    assert.deepEqual(
+      events.filter((e) => e.type === EVENT.effectCompleted).map(ordinalOf),
+      [0, 1, 2],
+    );
+
+    const replay = await replayRun({ capsule, runId: recorded.runId, homeDir: home });
+
+    assert.equal(replay.error, undefined);
+    assert.equal(replay.ok, true);
+    assert.equal(replay.diverged, false);
+    assert.equal(replay.effects, 4);
+    assert.deepEqual(replay.value, recorded.value);
+    assert.equal(replay.recordedValueDigest, digestOf(recorded.value));
   });
 });
 
