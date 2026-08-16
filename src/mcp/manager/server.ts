@@ -10,6 +10,7 @@ import {
   buildToolList,
   type CatalogTool,
 } from "../catalog.ts";
+import { INPUT_REQUIRED } from "../mrtr.ts";
 import {
   capsuleResultMeta,
   CATALOG_TTL_MS,
@@ -88,6 +89,8 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
   assertNoToolNameCollision(MANAGER_TOOLS.map((t) => t.name));
 
   let negotiatedVersion: string = MCP_PROTOCOL_VERSION;
+  let clientElicitation = false;
+  let currentTransport: Transport | undefined;
   const activeTransports = new Set<Transport>();
   const loadedCapsuleCache = new Map<string, LoadedCapsule>();
   let messageQueue = Promise.resolve();
@@ -328,21 +331,75 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       homeDir: opts.homeDir,
       warn,
       resultMeta: capsuleResultMeta(loaded.manifest),
-      legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
+      legacySession: () => false,
     };
 
-    return await handleToolsCall({ ...(request ?? {}), name: route.innerName }, ctx);
+    const callParams = { ...(request ?? {}), name: route.innerName };
+    const initialRes = await handleToolsCall(callParams, ctx);
+
+    if (initialRes["resultType"] === INPUT_REQUIRED) {
+      const inputRequests = asRecord(initialRes["inputRequests"]) as
+        | Record<string, { method: string; params: Record<string, unknown> }>
+        | undefined;
+      const requestState = initialRes["requestState"];
+      const missingGrants = Object.keys(inputRequests ?? {});
+
+      const transport = currentTransport ?? activeTransports.values().next().value;
+
+      if (!clientElicitation || transport === undefined) {
+        return {
+          resultType: "complete",
+          content: [
+            {
+              type: "text",
+              text:
+                `E_CONSENT: this tool needs user consent for: ${missingGrants.join(", ")}. ` +
+                `This MCP session uses a revision without the consent flow, so approval cannot be asked for here. ` +
+                `Ask the user to grant it once via the capsule UI (capsule ui ${sanitizeModelText(loaded.file, 200)}) ` +
+                `or a client speaking MCP 2026-07-28, then call this tool again.`,
+            },
+          ],
+          isError: true,
+          _meta: { code: "E_CONSENT", grants: missingGrants, ...ctx.resultMeta },
+        };
+      }
+
+      const inputResponses: Record<string, unknown> = {};
+      for (const [grant, req] of Object.entries(inputRequests ?? {})) {
+        try {
+          const elicitRes = await transport.request(req.method, req.params);
+          inputResponses[grant] = elicitRes;
+        } catch {
+          inputResponses[grant] = { action: "decline" };
+        }
+      }
+
+      return await handleToolsCall(
+        {
+          ...callParams,
+          requestState,
+          inputResponses,
+        },
+        ctx,
+      );
+    }
+
+    return initialRes;
   }
 
   const handlers = new Map<string, RpcHandler>([
     [
       "initialize",
       (params) => {
-        const requested = asRecord(params)?.["protocolVersion"];
+        const p = asRecord(params);
+        const requested = p?.["protocolVersion"];
         negotiatedVersion =
           typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
             ? requested
             : MCP_PROTOCOL_VERSION;
+        const capabilities = asRecord(p?.["capabilities"]);
+        clientElicitation =
+          capabilities?.["elicitation"] !== undefined && capabilities?.["elicitation"] !== null;
         return result({
           protocolVersion: negotiatedVersion,
           serverInfo,
@@ -396,6 +453,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       transport.onMessage((msg) => {
         messageQueue = messageQueue
           .then(async () => {
+            currentTransport = transport;
             const response = await handleMessage(msg);
             if (response !== undefined) {
               transport.send(response);

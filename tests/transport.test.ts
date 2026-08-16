@@ -380,3 +380,78 @@ test("JSON_RPC_ERROR exposes the standard JSON-RPC 2.0 codes", () => {
     InternalError: -32603,
   });
 });
+
+test("createStdioTransport.request sends JSON-RPC request and resolves on matching response", async () => {
+  const h = harness();
+  const reqPromise = h.transport.request("elicitation/create", { prompt: "allow?" });
+
+  const messages = h.messages() as Array<{ jsonrpc: string; id: number; method: string; params: { prompt: string } }>;
+  assert.equal(messages.length, 1);
+  const sentReq = messages[0]!;
+  assert.equal(sentReq.jsonrpc, "2.0");
+  assert.equal(typeof sentReq.id, "number");
+  assert.equal(sentReq.method, "elicitation/create");
+  assert.deepEqual(sentReq.params, { prompt: "allow?" });
+
+  // Simulate client response
+  h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: sentReq.id, result: { action: "accept" } })}\n`);
+  await h.settle();
+
+  const res = await reqPromise;
+  assert.deepEqual(res, { action: "accept" });
+  // The matched response was resolved, so it was not passed to onMessage received
+  assert.equal(h.received.length, 0);
+});
+
+test("createStdioTransport.request rejects with RpcFailure on error response", async () => {
+  const h = harness();
+  const reqPromise = h.transport.request("elicitation/create", { prompt: "allow?" });
+
+  const sentReq = (h.messages() as Array<{ id: number }>)[0]!;
+  const assertion = assert.rejects(
+    reqPromise,
+    (err: unknown) => {
+      const e = err as { code?: number; message?: string; name?: string };
+      return e.code === -32602 && e.message === "rejected" && e.name === "RpcFailure";
+    },
+  );
+  h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: sentReq.id, error: { code: -32602, message: "rejected" } })}\n`);
+  await h.settle();
+  await assertion;
+});
+
+test("createStdioTransport.request times out when response is not received", async () => {
+  const h = harness();
+  const reqPromise = h.transport.request("slow/method", {}, { timeoutMs: 20 });
+
+  await assert.rejects(
+    async () => await reqPromise,
+    (err: unknown) => {
+      const e = err as { code?: number; message?: string };
+      return e.code === JSON_RPC_ERROR.InternalError && (e.message?.includes("timed out") ?? false);
+    },
+  );
+});
+
+test("createStdioTransport.request rejects pending requests when transport is closed", async () => {
+  const h = harness();
+  const reqPromise = h.transport.request("slow/method", {});
+  h.transport.close();
+
+  await assert.rejects(
+    async () => await reqPromise,
+    (err: unknown) => {
+      const e = err as { code?: number; message?: string };
+      return e.code === JSON_RPC_ERROR.InternalError && e.message === "transport closed";
+    },
+  );
+
+  // Calling request after close rejects immediately
+  await assert.rejects(
+    async () => await h.transport.request("after/close"),
+    (err: unknown) => {
+      const e = err as { code?: number; message?: string };
+      return e.code === JSON_RPC_ERROR.InternalError && e.message === "transport closed";
+    },
+  );
+});

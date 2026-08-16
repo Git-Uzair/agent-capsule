@@ -63,13 +63,20 @@ async function packTestCapsule(
   return out;
 }
 
-function createMockTransport(): {
+function createMockTransport(opts: {
+  onRequest?: (method: string, params: unknown, id: number) => Promise<unknown> | unknown;
+} = {}): {
   transport: Transport;
   sent: JsonRpcMessage[];
   deliver(msg: JsonRpcMessage): Promise<void>;
 } {
   const sent: JsonRpcMessage[] = [];
   let onMsg: ((msg: JsonRpcMessage) => void | Promise<void>) | undefined;
+  let nextReqId = 1;
+  const pendingRequests = new Map<
+    number,
+    { resolve: (val: unknown) => void; reject: (err: unknown) => void }
+  >();
 
   const transport: Transport = {
     onMessage(handler) {
@@ -78,6 +85,16 @@ function createMockTransport(): {
     send(msg) {
       sent.push(msg);
     },
+    async request(method, params) {
+      const id = nextReqId++;
+      sent.push({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+      if (opts.onRequest !== undefined) {
+        return await opts.onRequest(method, params, id);
+      }
+      return new Promise((resolve, reject) => {
+        pendingRequests.set(id, { resolve, reject });
+      });
+    },
     close() {},
   };
 
@@ -85,6 +102,16 @@ function createMockTransport(): {
     transport,
     sent,
     async deliver(msg: JsonRpcMessage) {
+      if (!("method" in msg) && "id" in msg && typeof msg.id === "number" && pendingRequests.has(msg.id)) {
+        const pending = pendingRequests.get(msg.id)!;
+        pendingRequests.delete(msg.id);
+        if ("error" in msg) {
+          pending.reject(new Error(msg.error.message));
+        } else {
+          pending.resolve(msg.result);
+        }
+        return;
+      }
       if (onMsg) await onMsg(msg);
     },
   };

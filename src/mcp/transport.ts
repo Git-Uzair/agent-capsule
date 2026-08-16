@@ -58,9 +58,14 @@ export class RpcFailure extends Error {
   }
 }
 
+export type TransportRequestOptions = {
+  timeoutMs?: number;
+};
+
 export type Transport = {
   onMessage(handler: (msg: JsonRpcMessage) => void | Promise<void>): void;
   send(msg: JsonRpcMessage): void;
+  request(method: string, params?: unknown, opts?: TransportRequestOptions): Promise<unknown>;
   close(): void;
 };
 
@@ -131,6 +136,15 @@ export function createStdioTransport(
   // True while discarding the tail of a line that already exceeded the cap.
   let discarding = false;
   let closed = false;
+  let nextRequestId = 1;
+  const pendingRequests = new Map<
+    JsonRpcId,
+    {
+      resolve: (value: unknown) => void;
+      reject: (reason: unknown) => void;
+      timer?: NodeJS.Timeout;
+    }
+  >();
 
   function send(msg: JsonRpcMessage): void {
     if (closed) {
@@ -157,6 +171,21 @@ export function createStdioTransport(
   }
 
   function deliver(msg: JsonRpcMessage): void {
+    // If this message is a response to a server-initiated request, resolve or reject the pending promise.
+    if (!("method" in msg) && "id" in msg && msg.id !== null && pendingRequests.has(msg.id)) {
+      const pending = pendingRequests.get(msg.id)!;
+      pendingRequests.delete(msg.id);
+      if (pending.timer !== undefined) {
+        clearTimeout(pending.timer);
+      }
+      if ("error" in msg) {
+        pending.reject(new RpcFailure(msg.error.code, msg.error.message));
+      } else {
+        pending.resolve(msg.result);
+      }
+      return;
+    }
+
     if (handler === undefined) {
       return;
     }
@@ -169,6 +198,39 @@ export function createStdioTransport(
     } catch (err) {
       onHandlerError(msg, err);
     }
+  }
+
+  function request(
+    method: string,
+    params?: unknown,
+    opts: TransportRequestOptions = {},
+  ): Promise<unknown> {
+    if (closed) {
+      return Promise.reject(new RpcFailure(JSON_RPC_ERROR.InternalError, "transport closed"));
+    }
+    const id = nextRequestId++;
+    return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+      if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
+        timer = setTimeout(() => {
+          pendingRequests.delete(id);
+          reject(
+            new RpcFailure(
+              JSON_RPC_ERROR.InternalError,
+              `request ${method} timed out after ${opts.timeoutMs}ms`,
+            ),
+          );
+        }, opts.timeoutMs);
+        timer.unref?.();
+      }
+      pendingRequests.set(id, { resolve, reject, timer });
+      send({
+        jsonrpc: "2.0",
+        id,
+        method,
+        ...(params === undefined ? {} : { params }),
+      });
+    });
   }
 
   function handleLine(line: string): void {
@@ -241,12 +303,20 @@ export function createStdioTransport(
       handler = next;
     },
     send,
+    request,
     close(): void {
       if (closed) {
         return;
       }
       closed = true;
       buffer = "";
+      for (const pending of pendingRequests.values()) {
+        if (pending.timer !== undefined) {
+          clearTimeout(pending.timer);
+        }
+        pending.reject(new RpcFailure(JSON_RPC_ERROR.InternalError, "transport closed"));
+      }
+      pendingRequests.clear();
       input.off("data", onData);
       input.off("end", onEnd);
     },
