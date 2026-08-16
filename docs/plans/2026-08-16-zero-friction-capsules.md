@@ -212,12 +212,13 @@ Attempt ledger:
 
 ### P3 — Everyone else (non-Claude clients) + the file itself
 Status: completed
-Failed verify cycles: 0
+Failed verify cycles: 1
 Attempt ledger:
-- attempt 1: implement capsule share with deep links and json output, update ui server with standalone installer discovery page, rewrite README with 3 core journeys and developer CLI table, create docs/DISTRIBUTION.md, add comprehensive tests -> PASS
+- P3 attempt 1: initial share command, installer page, and docs rewrite -> FAIL (inline onclick CSP violation in installer page, README manager options mismatch, directory .mcpb detection, generateMcpServerConfig duplication, missing Open UI button)
+- P3 attempt 2: fix CSP inline onclick handlers using event listeners, sync README CLI table with manager flags, handle directory .mcpb detection with isFile check, unify generateMcpServerConfig, add Open Capsule UI and Add to Claude Desktop sections -> PASS
 
 **Verification Record (P3):**
-- Automated acceptance: PASS (tests in `tests/share.test.ts` verify deeplinks, mcpServers config, .mcpb discovery, and --json output; tests in `tests/ui-server.test.ts` verify installer discovery page for capsules without UI and at `/installer`, CSP headers, and token authentication).
+- Automated acceptance: PASS (tests in `tests/share.test.ts` verify deeplinks, mcpServers config, .mcpb discovery ignoring directories, and --json output; tests in `tests/ui-server.test.ts` verify installer discovery page, CSP compliant event listeners, Open Capsule UI buttons, and token authentication).
 - Manual acceptance: NOT PERFORMED (unattended CLI session; manual verification flagged for human owner).
 
 **P3-1. Deep links & snippets: `capsule share <file>`.**

@@ -87,7 +87,7 @@ The CLI is available as `capsule` or `agent-capsule` (via `npm install -g agent-
 | `ui` | `capsule ui <file> [--port <n>] [--timeout <min>] [--no-open]` | Start authenticated loopback HTTP server and open embedded UI or installer page. |
 | `share` | `capsule share <file> [--json] [--accept-drift]` | Generate multi-client sharing payloads, Cursor/VS Code deep links, and config snippets. |
 | `export-mcpb` | `capsule export-mcpb <file> [-o out.mcpb]` | Export a self-contained 1-click install `.mcpb` extension bundle for Claude Desktop. |
-| `manager` | `capsule manager [--accept-drift] [--allow-suspicious]` | Run the stdio Capsule Manager gateway server multiplexing all installed capsules. |
+| `manager` | `capsule manager [--home <dir>] [--downloads <dir>] [--allow-suspicious]` | Run the stdio Capsule Manager gateway server multiplexing all installed capsules. |
 | `build-manager-mcpb` | `capsule build-manager-mcpb [-o out.mcpb]` | Build the official Capsule Manager `.mcpb` bundle with authoring skills and gateway runtime. |
 | `conformance` | `capsule conformance <file> [--strict] [--perf] [--self-test]` | Run the 12 normative conformance vectors (C01–C12) against a capsule. |
 | `inject` | `capsule inject <file> --client-config <path> [--name <name>] [--yes]` | Safely inject MCP server configuration into client config files with shadow detection. |

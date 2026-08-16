@@ -1,7 +1,8 @@
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../format/capsule.ts";
+import { generateMcpServerConfig, type McpServerConfig } from "./inject.ts";
 
 const USAGE = "usage: capsule share <file> [--json] [--accept-drift]";
 
@@ -9,10 +10,7 @@ function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
 }
 
-export type McpServerConfigItem = {
-  command: string;
-  args: string[];
-};
+export type McpServerConfigItem = McpServerConfig;
 
 export type SharePayload = {
   capsuleId: string;
@@ -40,8 +38,12 @@ export function findMcpbFile(filePath: string, name: string, version: string): s
     `${absPath}.mcpb`,
   ];
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
+    try {
+      if (statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // candidate does not exist or stat failed
     }
   }
   return undefined;
@@ -54,10 +56,10 @@ export function buildSharePayload(capsule: LoadedCapsule, filePath: string): Sha
   const version = manifest.meta.version;
   const mcpbFile = findMcpbFile(absPath, name, version);
 
-  const serverConfig: McpServerConfigItem = {
-    command: "npx",
-    args: ["-y", "agent-capsule", "mcp", absPath, "--state-home"],
-  };
+  const serverConfig = generateMcpServerConfig(absPath, name, {
+    npx: true,
+    stateHome: true,
+  });
 
   const encodedConfig = encodeURIComponent(JSON.stringify(serverConfig));
   const encodedName = encodeURIComponent(name);

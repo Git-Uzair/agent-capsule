@@ -83,9 +83,17 @@ describe("capsule share", () => {
     });
   });
 
-  it("detects .mcpb file beside capsule when present", async () => {
+  it("detects .mcpb file beside capsule when present and ignores directories", async () => {
     await withHome(async (home) => {
       const capsule = await packTestCapsule(home);
+      // Directory with .mcpb extension should be ignored
+      const dirMcpb = resolve(home, "hello-1.0.0.mcpb");
+      mkdirSync(dirMcpb);
+
+      const payloadWithoutFile = buildSharePayload(capsule, capsule.file);
+      assert.equal(payloadWithoutFile.mcpb_file, undefined);
+
+      rmSync(dirMcpb, { recursive: true, force: true });
       const mcpbPath = resolve(home, "hello-1.0.0.mcpb");
       writeFileSync(mcpbPath, "fake mcpb content");
 

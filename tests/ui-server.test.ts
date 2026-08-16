@@ -592,6 +592,7 @@ test("a capsule with no local page serves the installer discovery page", async (
       assert.ok(res.body.includes("hello-no-ui"));
       assert.ok(res.body.includes("Capsule Identity &amp; Trust"));
       assert.ok(res.body.includes("Client Installation &amp; Sharing"));
+      assert.ok(res.body.includes("Add to Claude Desktop"));
       assert.ok(res.body.includes("Cursor"));
       assert.ok(res.body.includes("VS Code"));
       assert.ok(res.body.includes("cursor://anysphere.cursor-deeplink/mcp/install?"));
@@ -599,6 +600,9 @@ test("a capsule with no local page serves the installer discovery page", async (
       assert.ok(res.body.includes("npx -y agent-capsule mcp"));
       assert.ok(res.body.includes("Declared Capabilities"));
       assert.ok(res.body.includes("greet"));
+      assert.ok(res.body.includes("copy-btn"));
+      assert.ok(!res.body.includes("onclick="));
+      assert.ok(!res.body.includes("Open Capsule UI"));
 
       // Also accessible at /installer
       const installerRes = await raw({ port: ui.port, path: `/installer?t=${ui.token}` });
@@ -627,7 +631,12 @@ test("a capsule with local page also serves the installer page at /installer", a
       assert.equal(installerRes.headers["content-type"], "text/html; charset=utf-8");
       assert.ok(installerRes.body.includes("Capsule Identity &amp; Trust"));
       assert.ok(installerRes.body.includes("Client Installation &amp; Sharing"));
+      assert.ok(installerRes.body.includes("Add to Claude Desktop"));
       assert.ok(installerRes.body.includes("cursor://anysphere.cursor-deeplink/mcp/install?"));
+      assert.ok(installerRes.body.includes("Open Capsule UI"));
+      assert.ok(installerRes.body.includes(`/?t=${ui.token}`));
+      assert.ok(installerRes.body.includes("copy-btn"));
+      assert.ok(!installerRes.body.includes("onclick="));
     } finally {
       await ui.close();
     }

@@ -179,7 +179,7 @@ export function escapeHtml(str: string): string {
     .replace(/'/g, "&#039;");
 }
 
-export function renderInstallerHtml(capsule: LoadedCapsule): string {
+export function renderInstallerHtml(capsule: LoadedCapsule, token?: string): string {
   const manifest = capsule.manifest;
   const share = buildSharePayload(capsule, capsule.file);
   const title = manifest.meta.title || manifest.meta.name;
@@ -189,6 +189,8 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
     : manifest.capabilities?.net?.allow_localhost
       ? "localhost only"
       : "None";
+  const hasGuestUi = Boolean(manifest.ui?.local?.path ?? manifest.ui?.app?.path);
+  const uiUrl = token ? `/?t=${encodeURIComponent(token)}` : "/";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -312,11 +314,16 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
 <body>
   <div class="container">
     <header>
-      <h1>
-        ${escapeHtml(title)}
-        <span class="version">v${escapeHtml(manifest.meta.version)}</span>
-      </h1>
-      ${description ? `<p class="description">${escapeHtml(description)}</p>` : ""}
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+        <div>
+          <h1>
+            ${escapeHtml(title)}
+            <span class="version">v${escapeHtml(manifest.meta.version)}</span>
+          </h1>
+          ${description ? `<p class="description">${escapeHtml(description)}</p>` : ""}
+        </div>
+        ${hasGuestUi ? `<a href="${escapeHtml(uiUrl)}" class="btn btn-primary">Open Capsule UI</a>` : ""}
+      </div>
     </header>
 
     <div class="card">
@@ -346,8 +353,15 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
       <div class="install-tabs">
         <div class="install-option">
           <div class="install-header">
-            <span class="install-title">Claude Desktop (.mcpb)</span>
-            ${share.mcpb_file ? `<span class="badge badge-success">Ready</span>` : ""}
+            <span class="install-title">Add to Claude Desktop</span>
+            <div style="display:flex;gap:0.5rem;align-items:center">
+              ${share.mcpb_file ? `<span class="badge badge-success">Ready</span>` : ""}
+              ${
+                share.mcpb_file
+                  ? `<button class="btn btn-secondary copy-btn" data-snippet="${escapeHtml(share.mcpb_file)}">Copy Bundle Path</button>`
+                  : `<button class="btn btn-secondary copy-btn" data-snippet="capsule export-mcpb &quot;${escapeHtml(share.file)}&quot;">Copy Export Command</button>`
+              }
+            </div>
           </div>
           ${
             share.mcpb_file
@@ -361,7 +375,7 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
             <span class="install-title">Cursor</span>
             <div style="display:flex;gap:0.5rem">
               <a href="${escapeHtml(share.cursor_deeplink)}" class="btn btn-primary">Install in Cursor</a>
-              <button class="btn btn-secondary" data-snippet="${escapeHtml(share.cursor_deeplink)}" onclick="copySnippet(this)">Copy Link</button>
+              <button class="btn btn-secondary copy-btn" data-snippet="${escapeHtml(share.cursor_deeplink)}">Copy Link</button>
             </div>
           </div>
           <pre><code>${escapeHtml(share.cursor_deeplink)}</code></pre>
@@ -372,7 +386,7 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
             <span class="install-title">VS Code</span>
             <div style="display:flex;gap:0.5rem">
               <a href="${escapeHtml(share.vscode_deeplink)}" class="btn btn-primary">Install in VS Code</a>
-              <button class="btn btn-secondary" data-snippet="${escapeHtml(share.vscode_deeplink)}" onclick="copySnippet(this)">Copy Link</button>
+              <button class="btn btn-secondary copy-btn" data-snippet="${escapeHtml(share.vscode_deeplink)}">Copy Link</button>
             </div>
           </div>
           <pre><code>${escapeHtml(share.vscode_deeplink)}</code></pre>
@@ -381,7 +395,7 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
         <div class="install-option">
           <div class="install-header">
             <span class="install-title">Claude Code / Terminal (npx)</span>
-            <button class="btn btn-secondary" data-snippet="${escapeHtml(share.npx_command)}" onclick="copySnippet(this)">Copy Command</button>
+            <button class="btn btn-secondary copy-btn" data-snippet="${escapeHtml(share.npx_command)}">Copy Command</button>
           </div>
           <pre><code>${escapeHtml(share.npx_command)}</code></pre>
         </div>
@@ -389,7 +403,7 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
         <div class="install-option">
           <div class="install-header">
             <span class="install-title">Generic MCP Client (mcpServers JSON)</span>
-            <button class="btn btn-secondary" onclick="copySnippet(this)">Copy JSON</button>
+            <button class="btn btn-secondary copy-btn">Copy JSON</button>
           </div>
           <pre><code>${escapeHtml(JSON.stringify(share.mcp_servers_config, null, 2))}</code></pre>
         </div>
@@ -441,18 +455,20 @@ export function renderInstallerHtml(capsule: LoadedCapsule): string {
   </div>
 
   <script>
-    function copySnippet(btn) {
-      var text = btn.getAttribute("data-snippet");
-      if (!text) {
-        var target = btn.closest(".install-option").querySelector("pre code");
-        text = target ? target.innerText : "";
-      }
-      navigator.clipboard.writeText(text).then(function() {
-        var orig = btn.innerText;
-        btn.innerText = "Copied!";
-        setTimeout(function() { btn.innerText = orig; }, 2000);
+    document.querySelectorAll(".copy-btn").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        var text = btn.getAttribute("data-snippet");
+        if (!text) {
+          var target = btn.closest(".install-option").querySelector("pre code");
+          text = target ? target.innerText : "";
+        }
+        navigator.clipboard.writeText(text).then(function() {
+          var orig = btn.innerText;
+          btn.innerText = "Copied!";
+          setTimeout(function() { btn.innerText = orig; }, 2000);
+        });
       });
-    }
+    });
   </script>
 </body>
 </html>`;
@@ -499,7 +515,10 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   );
   const served = new Set(tools.map((tool) => tool.name));
 
-  const installerHtml = renderInstallerHtml(capsule);
+  const token = opts.token ?? randomBytes(TOKEN_BYTES).toString("hex");
+  const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_MS;
+
+  const installerHtml = renderInstallerHtml(capsule, token);
   const installerBuffer = Buffer.from(installerHtml, "utf8");
 
   let pageBuffer: Buffer;
@@ -522,9 +541,6 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   }
 
   const toolsBody = Buffer.from(JSON.stringify({ tools }), "utf8");
-
-  const token = opts.token ?? randomBytes(TOKEN_BYTES).toString("hex");
-  const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_MS;
 
   const securityHeaders: Record<string, string> = {
     "content-security-policy": guestPageCsp,

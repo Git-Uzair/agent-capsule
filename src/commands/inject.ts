@@ -4,8 +4,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
 import { emptyDict } from "../security/store.ts";
 
+export type McpServerConfigOptions = {
+  npx?: boolean;
+  stateHome?: boolean;
+  type?: "stdio";
+};
+
 export type McpServerConfig = {
-  type: "stdio";
+  type?: "stdio";
   command: string;
   args: string[];
 };
@@ -20,12 +26,31 @@ function usage(message: string): never {
 export function generateMcpServerConfig(
   capsulePath: string,
   _name?: string,
+  options?: McpServerConfigOptions,
 ): McpServerConfig {
-  return {
-    type: "stdio",
-    command: "agent-capsule",
-    args: ["mcp", resolve(capsulePath)],
+  const absPath = resolve(capsulePath);
+  const useNpx = options?.npx ?? false;
+  const useStateHome = options?.stateHome ?? false;
+
+  const command = useNpx ? "npx" : "agent-capsule";
+  const args = useNpx
+    ? ["-y", "agent-capsule", "mcp", absPath]
+    : ["mcp", absPath];
+
+  if (useStateHome) {
+    args.push("--state-home");
+  }
+
+  const result: McpServerConfig = {
+    command,
+    args,
   };
+  if (options?.type !== undefined) {
+    result.type = options.type;
+  } else if (!useNpx) {
+    result.type = "stdio";
+  }
+  return result;
 }
 
 /**
