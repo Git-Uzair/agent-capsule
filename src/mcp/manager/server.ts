@@ -135,14 +135,17 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
 
   /**
    * The single place a registry entry turns into bytes this server is willing to run. Two gates, both
-   * of them the point: the file is verified against the trust store on its first use in this session
-   * (drift is never auto-accepted here — only `capsule_install` may re-pin, and only when the user
-   * said `accept_drift`), and its payload digest must still be the registry key, so swapping
-   * `capsules/<id>.capsule` for another validly signed capsule cannot borrow the trusted name. Caching
-   * that verdict for the rest of the session is safe because the key *is* the content address;
-   * `invalidateCache` runs on every registry change, and nothing else re-verifies — a file changed
-   * underneath a running manager is caught on the next session or after the next registry change,
-   * which is exactly what `capsule_list`'s description promises.
+   * of them the point: the file is verified against the trust store (drift is never auto-accepted
+   * here — only `capsule_install` may re-pin, and only when the user said `accept_drift`), and its
+   * payload digest must still be the registry key, so swapping `capsules/<id>.capsule` for another
+   * validly signed capsule cannot borrow the trusted name. Only a passing verdict is cached, and only
+   * that one is safe to cache: the key *is* the content address, so verified bytes stay verified until
+   * `invalidateCache` (every registry change) drops them — which is why a file changed underneath a
+   * running manager is caught on the next session or after the next registry change, not on the next
+   * listing. A failure deliberately caches nothing: `corrupt`/`unverifiable` describes the file and the
+   * trust store as they are right now, so every later listing re-reads both — it warns again while they
+   * are still wrong, and the capsule serves its tools again the moment they are right, with no registry
+   * change needed. Those are the two branches `capsule_list`'s description promises.
    */
   async function verifyInstalled(
     capsuleId: string,

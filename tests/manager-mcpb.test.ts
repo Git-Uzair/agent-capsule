@@ -460,29 +460,30 @@ describe("capsule build-manager-mcpb", () => {
         !/\bdrift\b(?!-)/.test(listTool.description),
         "capsule_list description must not name a bare 'drift' state — the real spelling is drift-accepted",
       );
-      // The verification lifecycle this host actually has: verifyInstalled (src/mcp/manager/server.ts)
-      // returns a cached LoadedCapsule per capsuleId and only invalidateCache — on install, update or
-      // uninstall — clears it, so a listing repeats the session's verdict instead of re-reading the file.
-      // The description must promise that, not per-listing re-verification; the test below drives it.
+      // The verification lifecycle this host actually has, and it has two halves: verifyInstalled
+      // (src/mcp/manager/server.ts) caches only the LoadedCapsule of a file that verified — cleared by
+      // invalidateCache on install, update or uninstall — while a "corrupt"/"unverifiable" verdict
+      // returns without caching anything, so that file is re-read on every listing. The description
+      // must promise both halves and neither as the whole rule; the test below drives them.
       assert.match(
         listTool.description,
-        /verified against the trust store once per manager session/,
-        "capsule_list description must say verification happens once per manager session",
-      );
-      assert.match(
-        listTool.description,
-        /after any registry change \(install, update, uninstall\)/,
-        "capsule_list description must name the registry changes that verify again",
-      );
-      assert.match(
-        listTool.description,
-        /verdict is then cached for the rest of the session/,
-        "capsule_list description must say the verdict is cached for the rest of the session",
+        /a file that verified is cached, and every later listing repeats that verdict until the next registry change \(install, update, uninstall\) clears it/,
+        "capsule_list description must say a successful verdict is cached until the next registry change",
       );
       assert.match(
         listTool.description,
         /noticed on the next session or after the next registry change, not on the next listing/,
-        "capsule_list description must say when a file altered underneath a running manager is noticed",
+        "capsule_list description must say when a valid file altered underneath a running manager is noticed",
+      );
+      assert.match(
+        listTool.description,
+        /a file that failed verification is not cached and is re-read from disk on every listing/,
+        "capsule_list description must say a failed verdict is re-checked from disk on every listing",
+      );
+      assert.match(
+        listTool.description,
+        /as soon as the file and the trust store are right again, with no registry change needed/,
+        "capsule_list description must say how corrupt or unverifiable state clears",
       );
       assert.ok(
         listTool.description.includes("never re-pins anything"),
@@ -491,6 +492,10 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(
         !/listing re-verifies/.test(listTool.description),
         "capsule_list description must not claim a listing re-verifies the installed file",
+      );
+      assert.ok(
+        !/once per manager session/.test(listTool.description),
+        "capsule_list description must not claim verification happens once per session — a failed verdict is not cached",
       );
 
       const testTool = tools.find((t) => t.name === "capsule_test_tool")!;
@@ -819,7 +824,7 @@ describe("capsule build-manager-mcpb", () => {
     });
   });
 
-  it("repeats a cached verdict for the rest of the session and verifies again after a registry change", async () => {
+  it("caches a verified file for the session but re-reads a failed one on every listing", async () => {
     await withHome(async (home) => {
       const warnings: string[] = [];
       const options = {
@@ -866,10 +871,15 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(first.tools.includes("notes1__peek"), `capsule_list did not report notes1__peek: ${first.tools.join(", ")}`);
 
       // Now break the installed file underneath the running manager and delete the trust store it was
-      // checked against. The description says a listing re-reads neither, and it does not: the same
-      // verdict, the same served tools, and nothing new warned because nothing was verified.
-      writeFileSync(installedCapsulePath(keptId, home), Buffer.from("not a capsule"));
-      rmSync(join(home, "trust.json"));
+      // checked against. The description says a listing re-reads neither while the cached verdict
+      // stands, and it does not: the same verdict, the same served tools, and nothing new warned
+      // because nothing was verified.
+      const keptFile = installedCapsulePath(keptId, home);
+      const trustFile = join(home, "trust.json");
+      const goodBytes = readFileSync(keptFile);
+      const goodTrust = readFileSync(trustFile);
+      writeFileSync(keptFile, Buffer.from("not a capsule"));
+      rmSync(trustFile);
       const warnedBefore = warnings.length;
       const cached = rowFor(await listRows(), keptId);
       assert.deepEqual(
@@ -899,6 +909,26 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(
         warnings.some((line) => line.includes(`Failed to verify installed capsule ${keptId}`)),
         `the verification after the registry change must report why the file was refused: ${warnings.join(" | ")}`,
+      );
+
+      // The other half of the rule: that failure was not cached, so this listing re-reads the file
+      // rather than repeating the verdict — it warns again for bytes that are still broken.
+      const warnedAtCorrupt = warnings.length;
+      assert.equal(rowFor(await listRows(), keptId).trust, "corrupt");
+      assert.ok(
+        warnings.slice(warnedAtCorrupt).some((line) => line.includes(`Failed to verify installed capsule ${keptId}`)),
+        "a failed verdict is not cached, so the next listing must read the file and warn again",
+      );
+
+      // And because it is re-read, putting the bytes and the trust store back is enough on its own:
+      // the next listing reports 'ok' and serves the tools again, with no registry change in between.
+      writeFileSync(keptFile, goodBytes);
+      writeFileSync(trustFile, goodTrust);
+      const repaired = rowFor(await listRows(), keptId);
+      assert.deepEqual(
+        { trust: repaired.trust, tools: repaired.tools },
+        { trust: first.trust, tools: first.tools },
+        "a repaired file must verify and serve again on the next listing, with no registry change",
       );
     });
   });
