@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { packDirectory } from "../src/format/capsule.ts";
 import { createManagerServer, ELICITATION_TIMEOUT_MS } from "../src/mcp/manager/server.ts";
-import { DECISION, DECISION_PROPERTY, ELICITATION_METHOD } from "../src/mcp/mrtr.ts";
+import { DECISION, DECISION_PROPERTY, ELICITATION_METHOD, INPUT_REQUIRED } from "../src/mcp/mrtr.ts";
 import { MCP_PROTOCOL_VERSION, SERVER_INFO_META } from "../src/mcp/server.ts";
 import {
   type JsonRpcId,
@@ -373,12 +373,23 @@ test("Manager elicitation: user answers 'deny' -> returns error result with E_PO
 
     assert.equal(elicitationCount, 1);
     const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
-      result: { isError: boolean; content: Array<{ text: string }>; _meta?: { code?: string } };
+      result: {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string; grants?: string[]; [key: string]: unknown };
+      };
     };
     assert.ok(pullRes);
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
-    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    // A refusal the user actually uttered says so plainly, and names the grant it is about.
+    assert.equal(pullRes.result.content[0]?.text, `E_POLICY: user denied ${NET_GRANT}`);
+    assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
+    // A routed refusal carries the same capsule identity a routed success does.
+    assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
+      name: "capsule/netcap_deny",
+      version: "1.0.0",
+    });
 
     // Grants store untouched
     assert.equal(hasGrant(loadGrants(home), capsuleId, NET_GRANT), false);
@@ -427,16 +438,26 @@ test("Manager elicitation: client declines or cancels -> returns error result wi
     await server.drain();
 
     const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
-      result: { isError: boolean; content: Array<{ text: string }>; _meta?: { code?: string } };
+      result: {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string; grants?: string[]; [key: string]: unknown };
+      };
     };
     assert.ok(pullRes);
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
-    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    // A decline is an answer a human gave, so the refusal reads as the denial it is.
+    assert.equal(pullRes.result.content[0]?.text, `E_POLICY: user denied ${NET_GRANT}`);
+    assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
+    assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
+      name: "capsule/netcap_decline",
+      version: "1.0.0",
+    });
   });
 });
 
-test("Manager elicitation fallback: client WITHOUT elicitation capability gets E_CONSENT text result", async () => {
+test("Manager elicitation fallback: a legacy revision without elicitation gets the E_CONSENT text result", async () => {
   await withHome(async (home, downloads) => {
     const capsulePath = await packNetCapsule(home, "netcap_nocap");
     let elicitationCalled = false;
@@ -482,13 +503,97 @@ test("Manager elicitation fallback: client WITHOUT elicitation capability gets E
 
     // Received E_CONSENT text error
     const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
-      result: { isError: boolean; content: Array<{ text: string }>; _meta?: { code?: string; grants?: string[] } };
+      result: {
+        resultType?: string;
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string; grants?: string[] };
+      };
     };
     assert.ok(pullRes);
+    assert.equal(pullRes.result.resultType, "complete");
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_CONSENT");
     assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
     assert.match(pullRes.result.content[0]?.text ?? "", /^E_CONSENT: this tool needs user consent for: net:api\.example\.com/);
+    // The sentence is only true of a session that really has no consent flow: this one negotiated
+    // 2025-06-18 and offered no elicitation, so there is no way left to ask here.
+    assert.match(pullRes.result.content[0]?.text ?? "", /revision without the consent flow/);
+  });
+});
+
+test("Manager elicitation: a 2026-07-28 client without elicitation gets MRTR input_required, not E_CONSENT", async () => {
+  await withHome(async (home, downloads) => {
+    const capsulePath = await packNetCapsule(home, "netcap_native");
+    let elicitationCalled = false;
+
+    const mock = createMockTransport({
+      onRequest: () => {
+        elicitationCalled = true;
+        return { action: "accept", content: { [DECISION_PROPERTY]: DECISION.alwaysAllow } };
+      },
+    });
+
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    server.serve(mock.transport);
+
+    // A native session that declares no elicitation capability: MRTR is the client's own to render.
+    await mock.deliver(
+      rpc("initialize", { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {} }),
+    );
+    await server.drain();
+
+    await mock.deliver(
+      rpc("tools/call", { name: "capsule_install", arguments: { path: capsulePath } }),
+    );
+    await server.drain();
+
+    const installMsg = mock.sent.find(
+      (m) => "result" in m && (m.result as { structuredContent?: { name?: string } }).structuredContent?.name === "netcap_native",
+    ) as { result: { structuredContent: { capsuleId: string } } };
+    const capsuleId = installMsg.result.structuredContent.capsuleId;
+
+    await mock.deliver(
+      rpc("tools/call", { name: "netcap_native__pull", arguments: {} }),
+    );
+    await server.drain();
+
+    // The server never asked the client anything, and the question reached it as MRTR — never as the
+    // legacy sentence, which would be false of a session that negotiated 2026-07-28.
+    assert.equal(elicitationCalled, false);
+    const asked = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: {
+        resultType?: string;
+        inputRequests?: Record<string, { method: string }>;
+        requestState?: string;
+        content?: Array<{ text: string }>;
+      };
+    };
+    assert.ok(asked);
+    assert.equal(asked.result.resultType, INPUT_REQUIRED);
+    assert.equal(asked.result.inputRequests?.[NET_GRANT]?.method, ELICITATION_METHOD);
+    assert.equal(typeof asked.result.requestState, "string");
+    assert.equal(asked.result.content, undefined);
+
+    // And the client can finish the flow itself: the retry it builds from that token runs the tool.
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "netcap_native__pull",
+        arguments: {},
+        requestState: asked.result.requestState,
+        inputResponses: {
+          [NET_GRANT]: { action: "accept", content: { [DECISION_PROPERTY]: DECISION.alwaysAllow } },
+        },
+      }),
+    );
+    await server.drain();
+
+    const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: { isError: boolean; content: Array<{ text: string }> };
+    };
+    assert.equal(pullRes.result.isError, false);
+    assert.equal(pullRes.result.content[0]?.text, "pulled data");
+    assert.equal(hasGrant(loadGrants(home), capsuleId, NET_GRANT), true);
   });
 });
 
@@ -555,9 +660,13 @@ test("Manager elicitation: accept response without valid decision returns readab
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
     assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
-    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
-    // An answer the server could not read is not a denial anybody made, and the refusal says so.
-    assert.match(pullRes.result.content[0]?.text ?? "", /could not be read/);
+    // An answer the server could not read is not a denial anybody made, and the refusal never says
+    // one was: it reports the question as unresolved and names the grant that is still missing.
+    assert.match(
+      pullRes.result.content[0]?.text ?? "",
+      /^E_POLICY: consent for net:api\.example\.com is unresolved — the question was asked and no usable answer came back/,
+    );
+    assert.doesNotMatch(pullRes.result.content[0]?.text ?? "", /user denied/);
     // The refusal is built by the shared result builder, so it carries the routed capsule's identity.
     assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
       name: "capsule/netcap_nodecision",
@@ -624,7 +733,11 @@ test("Manager elicitation: accept response with invalid decision value returns r
     assert.equal(pullRes.result.resultType, "complete");
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
-    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    assert.match(
+      pullRes.result.content[0]?.text ?? "",
+      /^E_POLICY: consent for net:api\.example\.com is unresolved/,
+    );
+    assert.doesNotMatch(pullRes.result.content[0]?.text ?? "", /user denied/);
   });
 });
 
@@ -682,14 +795,25 @@ test("Manager elicitation: transport request passes timeoutMs and unanswered eli
         resultType?: string;
         isError: boolean;
         content: Array<{ text: string }>;
-        _meta?: { code?: string };
+        _meta?: { code?: string; grants?: string[]; [key: string]: unknown };
       };
     };
     assert.ok(pullRes);
     assert.equal(pullRes.result.resultType, "complete");
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
-    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
+    assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
+      name: "capsule/netcap_timeout",
+      version: "1.0.0",
+    });
+    // Nobody answered inside the window, so the refusal reports an unresolved question — it must not
+    // tell the model a user denied a capability when no user ever saw the question.
+    assert.match(
+      pullRes.result.content[0]?.text ?? "",
+      /^E_POLICY: consent for net:api\.example\.com is unresolved/,
+    );
+    assert.doesNotMatch(pullRes.result.content[0]?.text ?? "", /user denied/);
 
     // Verify subsequent request (tools/list) can run and drain settles without hanging
     await mock.deliver(rpc("tools/list"));

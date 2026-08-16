@@ -10,6 +10,9 @@ import { BUILTIN_TOOLS, handleBuiltinCall } from "./builtin.ts";
 import { parseMeta, type Meta } from "./meta.ts";
 import { buildInputRequired, DECISION, readInputResponses } from "./mrtr.ts";
 import { loadStateKey, signRequestState, verifyRequestState, type RequestStatePayload } from "./requeststate.ts";
+// The envelope builder every server on this host answers in. `server.ts` imports this module in
+// turn; both directions are function declarations used at call time, so the cycle is inert.
+import { createResultBuilder } from "./server.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "./transport.ts";
 
 /** How long a consent question stays answerable. Long enough to read, short enough to be a window. */
@@ -80,18 +83,41 @@ function callGrants(capsuleId: string, grants: readonly string[]): GrantsStore {
 }
 
 /**
- * The one refusal text a withheld capability produces. Two places reach this dead end: the retry
- * below, where the user's answer was `deny`, and the manager's gateway, where the answer never became
- * a decision at all — declined, cancelled, timed out, or a choice the server could not read. The
- * `unresolved` wording says which of the two happened instead of asserting a denial nobody made; the
- * grant is missing either way, so the code and the outcome are the same. It lives here, beside the
- * deny path that first needed it, so the sentence exists once rather than once per server.
+ * Why a capability stayed withheld, as far as this host actually knows. `denied` is a human's answer:
+ * the user chose `deny`, declined the question or cancelled it. `unresolved` is the absence of one —
+ * nobody was there to ask, the ask itself failed, the answering window closed, or the answer carried
+ * no decision this server could read. Keeping the two apart is the point of the distinction: a model
+ * told "user denied" when no human ever spoke would report a decision that was never made.
  */
-export function formatPolicyDenial(grants: readonly string[], unresolved = false): string {
-  const denial = `E_POLICY: user denied ${grants.join(", ")}`;
-  return unresolved
-    ? `${denial}, or the consent answer could not be read — the capability is not granted, so nothing ran.`
-    : denial;
+export type RefusalReason = "denied" | "unresolved";
+
+/**
+ * The one refusal a withheld capability produces — envelope, code, grants and sentence in one place.
+ * Two callers reach this dead end: the retry below, where the answer was `deny`, and the manager's
+ * gateway, where the question ended unresolved. Both are built by the shared result builder, so a
+ * refusal names the missing grants and carries the identity of the server that produced it whether
+ * the capsule was served directly or routed through the gateway.
+ */
+export function policyRefusal(
+  ctx: McpServerContext,
+  grants: readonly string[],
+  reason: RefusalReason,
+): Record<string, unknown> {
+  const named = grants.join(", ");
+  return createResultBuilder(ctx.resultMeta)(
+    {
+      content: [
+        textContent(
+          reason === "denied"
+            ? `E_POLICY: user denied ${named}`
+            : `E_POLICY: consent for ${named} is unresolved — the question was asked and no usable ` +
+              `answer came back, so the capability is not granted and nothing ran.`,
+        ),
+      ],
+      isError: true,
+    },
+    { code: "E_POLICY", grants: [...grants] },
+  );
 }
 
 /**
@@ -208,14 +234,9 @@ export async function handleToolsCall(
     for (const grant of payload.grants) {
       const decision = decisions[grant];
       if (decision === DECISION.deny) {
-        // The user's answer, not a protocol failure — and the same result shape as any other refusal
-        // a model has to read.
-        return {
-          resultType: "complete",
-          content: [textContent(formatPolicyDenial([grant]))],
-          isError: true,
-          _meta: { code: "E_POLICY" },
-        };
+        // The user's answer, not a protocol failure — and the same refusal, with the same code, the
+        // same missing grant and the same server identity, as the one the gateway ends on.
+        return policyRefusal(ctx, [grant], "denied");
       }
       if (decision === DECISION.alwaysAllow) {
         // Read, add, write: the store on disk is the user's, and another capsule's answers in it are

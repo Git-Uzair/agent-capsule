@@ -4,7 +4,7 @@ import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
 import { homeSidecarPaths } from "../../runtime/invoke.ts";
 import { HOST_VERSION } from "../../version.ts";
 import { BUILTIN_TOOLS } from "../builtin.ts";
-import { formatPolicyDenial, handleToolsCall, type McpServerContext } from "../call.ts";
+import { handleToolsCall, policyRefusal, type McpServerContext } from "../call.ts";
 import {
   assertNoToolNameCollision,
   buildToolList,
@@ -334,63 +334,56 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       homeDir: opts.homeDir,
       warn,
       resultMeta: capsuleResultMeta(loaded.manifest),
-      legacySession: () => !clientElicitation,
+      // Legacy means only one thing here: a session that can carry the consent question neither way.
+      // A pre-2026 revision has no MRTR, and a client that offers no `elicitation` leaves nothing to
+      // ask with, so the missing grants become the readable `E_CONSENT` result and the sentence about
+      // this revision is true. A client that offers elicitation is asked below whatever revision it
+      // negotiated; a `2026-07-28` client that does not gets the MRTR `input_required` it can render
+      // and retry itself, which is what this server would answer without the gateway in the way.
+      legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION && !clientElicitation,
     };
 
     const callParams = { ...(request ?? {}), name: route.innerName };
     const initialRes = await handleToolsCall(callParams, ctx);
-
-    if (initialRes["resultType"] === INPUT_REQUIRED) {
-      const inputRequests = asRecord(initialRes["inputRequests"]) as
-        | Record<string, { method: string; params: Record<string, unknown> }>
-        | undefined;
-      const requestState = initialRes["requestState"];
-      const missingGrants = Object.keys(inputRequests ?? {});
-
-      const transport = currentTransport ?? activeTransports.values().next().value;
-
-      const inputResponses: Record<string, unknown> = {};
-      for (const [grant, req] of Object.entries(inputRequests ?? {})) {
-        try {
-          const elicitRes =
-            transport !== undefined
-              ? await transport.request(req.method, req.params, { timeoutMs: ELICITATION_TIMEOUT_MS })
-              : { action: "decline" };
-          inputResponses[grant] = elicitRes;
-        } catch {
-          inputResponses[grant] = { action: "decline" };
-        }
-      }
-
-      const retryRes = await handleToolsCall(
-        {
-          ...callParams,
-          requestState,
-          inputResponses,
-        },
-        ctx,
-      );
-
-      if (retryRes["resultType"] === INPUT_REQUIRED) {
-        // The client answered, but nothing in the answer was a decision this server could use, so the
-        // grant is still missing and there is nobody left to ask: the request ends as the refusal a
-        // model reads, built by the same builder and worded by the same helper as every other one.
-        const remainingRequests = asRecord(retryRes["inputRequests"]);
-        const remaining = Object.keys(remainingRequests ?? {});
-        const grants = remaining.length > 0 ? remaining : missingGrants;
-        return createResultBuilder(ctx.resultMeta)(
-          {
-            content: [{ type: "text", text: formatPolicyDenial(grants, true) }],
-            isError: true,
-          },
-          { code: "E_POLICY", grants },
-        );
-      }
-
-      return retryRes;
+    if (initialRes["resultType"] !== INPUT_REQUIRED || !clientElicitation) {
+      return initialRes;
     }
 
-    return initialRes;
+    // The question, one elicitation per missing grant. An ask that produced no answer at all — no
+    // transport to ask on, an RPC error, the 60 s window closing — is left out of `inputResponses`
+    // rather than answered on the user's behalf: the specification's rule for an answer a server
+    // cannot use is to ask again for that grant, which is exactly what makes the retry below report
+    // it as still missing instead of as a refusal nobody uttered.
+    const inputRequests = asRecord(initialRes["inputRequests"]) as
+      | Record<string, { method: string; params: Record<string, unknown> }>
+      | undefined;
+    const transport = currentTransport ?? activeTransports.values().next().value;
+    const inputResponses: Record<string, unknown> = {};
+    for (const [grant, req] of Object.entries(inputRequests ?? {})) {
+      if (transport === undefined) {
+        warn(`No client transport to ask about ${grant}: the consent question stays unanswered.`);
+        continue;
+      }
+      try {
+        inputResponses[grant] = await transport.request(req.method, req.params, {
+          timeoutMs: ELICITATION_TIMEOUT_MS,
+        });
+      } catch (e) {
+        warn(`Consent question for ${grant} went unanswered: ${String(e)}`);
+      }
+    }
+
+    const retryRes = await handleToolsCall(
+      { ...callParams, requestState: initialRes["requestState"], inputResponses },
+      ctx,
+    );
+    // Everything the client had to say is in, and a grant is still missing: there is nobody left to
+    // ask, so the call ends as the refusal a model reads — worded for what actually happened, since
+    // no human refused anything here. A `deny` never reaches this line; `handleToolsCall` returns
+    // that refusal itself, from the same builder with the same `_meta`.
+    return retryRes["resultType"] === INPUT_REQUIRED
+      ? policyRefusal(ctx, Object.keys(asRecord(retryRes["inputRequests"]) ?? {}), "unresolved")
+      : retryRes;
   }
 
   const handlers = new Map<string, RpcHandler>([
