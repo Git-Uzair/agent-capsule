@@ -16,6 +16,17 @@ import {
   removeInstalledCapsulesByName,
 } from "./registry.ts";
 
+/**
+ * The alphabet a gateway name is built from. Both halves of `<capsuleName>__<toolName>` have to obey
+ * it, and only one half does by construction: capsule.json restricts a *tool* name to
+ * `^[a-zA-Z0-9_-]{1,64}$`, but `meta.name` also permits `.`, so nothing except this check keeps a
+ * dotted capsule name out of the merged namespace. Such a name is refused rather than rewritten into
+ * `a_b`: the rewrite would advertise tools under a name the capsule never declared, and `a.b` and a
+ * genuine `a_b` capsule would then claim the same prefix — the confusable pair this host refuses a
+ * capsule for in the first place.
+ */
+export const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
 export const MANAGER_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_install",
@@ -176,6 +187,17 @@ export async function handleCapsuleInstall(
     }
     const text = `Failed to load capsule: ${err instanceof Error ? err.message : String(err)}`;
     return { text, structured: { ok: false, error: "E_CONTAINER", message: text }, isError: true };
+  }
+
+  // The gateway prefixes every tool with this name, so a name outside the namespace alphabet is
+  // refused before the file is copied anywhere. Safe to interpolate: capsule.json already limits
+  // `meta.name` to `[a-z0-9._-]`, and it is the `.` this rejects.
+  if (!GATEWAY_NAME_PATTERN.test(loaded.manifest.meta.name)) {
+    const text =
+      `Capsule '${loaded.manifest.meta.name}' cannot be served by the gateway: its name must match ` +
+      `[a-zA-Z0-9_-] (1-64 characters) so that '<capsuleName>__<toolName>' names one capsule ` +
+      `unambiguously. Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
   }
 
   // Refused at the door, exactly as the direct server refuses such a capsule before it serves

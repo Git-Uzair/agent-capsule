@@ -30,6 +30,7 @@ import {
 import { confusableSkeleton, sanitizeModelText } from "../../security/text.ts";
 import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
 import {
+  GATEWAY_NAME_PATTERN,
   handleCapsuleInstall,
   handleCapsuleList,
   handleCapsuleUninstall,
@@ -200,6 +201,18 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       row.publisherKey = loaded.keyId;
       row.capabilities = declaredCapabilities(loaded.manifest);
 
+      // `capsule_install` refuses this name, but the registry outlives any one build of the manager:
+      // a row written by an older manager, or by hand, must be inert rather than advertised under a
+      // prefix that is not a legal gateway name.
+      if (!GATEWAY_NAME_PATTERN.test(row.name)) {
+        warn(
+          `Refusing installed capsule ${capsuleId}: '${row.name}' is not a legal gateway namespace ` +
+            `([a-zA-Z0-9_-], 1-64 characters), so '${row.name}__<tool>' cannot name it unambiguously.`,
+        );
+        row.note = `suppressed: capsule name '${row.name}' is not a legal gateway namespace`;
+        continue;
+      }
+
       // The refusal the direct server makes before it ever opens a transport, applied per capsule:
       // two names one human reads as one are a phishing vector inside that capsule's own list, and a
       // shared `<name>__` prefix carries the pair into the merged namespace unchanged — so a
@@ -287,13 +300,11 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     const managerTool = managerTools.get(fullName);
     if (managerTool !== undefined) {
       const res = await managerTool(request?.["arguments"]);
-      return {
-        resultType: "complete",
+      return result({
         content: [{ type: "text", text: res.text }],
         structuredContent: res.structured,
         isError: res.isError,
-        _meta: { ...resultMeta },
-      };
+      });
     }
 
     // Gateway dispatch reads the routing table the merged catalog was built from, so the name the

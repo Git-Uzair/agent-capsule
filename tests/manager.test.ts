@@ -9,11 +9,12 @@ import { createManagerServer, type ManagerMcpServer } from "../src/mcp/manager/s
 import {
   addInstalledCapsule,
   installedCapsulePath,
+  installedCapsulesDir,
   loadInstalledStore,
   saveInstalledStore,
 } from "../src/mcp/manager/registry.ts";
 import { scanDownloads } from "../src/mcp/manager/downloads.ts";
-import { MCP_PROTOCOL_VERSION } from "../src/mcp/server.ts";
+import { MCP_PROTOCOL_VERSION, SERVER_INFO_META } from "../src/mcp/server.ts";
 import {
   JSON_RPC_ERROR,
   type JsonRpcMessage,
@@ -144,11 +145,19 @@ test("Manager server: capsule_install by path and gateway tool execution", async
     );
     assert.ok(installRes && "result" in installRes);
     const installResult = installRes.result as {
+      resultType: string;
       isError: boolean;
       structuredContent: { ok: boolean; name: string; version: string; capsuleId: string; tools: string[] };
       content: Array<{ text: string }>;
+      _meta: Record<string, unknown>;
     };
     assert.equal(installResult.isError, false);
+    // A manager tool answers in the same envelope every other result on this host uses, identity and
+    // all — the shared builder's, not a hand-rolled copy of it.
+    assert.equal(installResult.resultType, "complete");
+    assert.deepEqual(installResult._meta, {
+      [SERVER_INFO_META]: { name: "capsule-manager", version: "0.1.0" },
+    });
     assert.equal(installResult.structuredContent.ok, true);
     assert.equal(installResult.structuredContent.name, "hello");
     assert.equal(installResult.structuredContent.version, "1.0.0");
@@ -710,6 +719,70 @@ test("Manager server: confusable tool names inside one capsule are refused and n
       capsuleList as { result: { structuredContent: { capsules: Array<{ tools: string[]; note?: string }> } } }
     ).result.structuredContent.capsules;
     assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]!.tools, []);
+    assert.match(rows[0]!.note ?? "", /suppressed/);
+  });
+});
+
+test("Manager server: a dotted capsule name is refused and never enters the gateway namespace", async () => {
+  await withHome(async (home, downloads) => {
+    const warnings: string[] = [];
+    const server = createManagerServer({
+      homeDir: home,
+      downloadsDir: downloads,
+      warn: (line) => warnings.push(line),
+    });
+
+    // `capsule.json` permits `.` in `meta.name` but not in a tool name, so only the capsule half of
+    // `<capsuleName>__<toolName>` can carry one: `a.b` would be advertised and routed as `a.b__greet`.
+    const capsulePath = await packTestCapsule(home, "a.b");
+
+    const installRes = await server.handleMessage(
+      rpc("tools/call", { name: "capsule_install", arguments: { path: capsulePath } }),
+    );
+    assert.ok(installRes && "result" in installRes);
+    const installResult = installRes.result as {
+      isError: boolean;
+      structuredContent: { ok: boolean; error: string };
+    };
+    assert.equal(installResult.isError, true);
+    assert.equal(installResult.structuredContent.error, "E_CONTENT");
+    // Refused before anything was written: no registry row, no copied file.
+    assert.equal(Object.keys(loadInstalledStore(home).capsules).length, 0);
+    assert.equal(existsSync(installedCapsulesDir(home)), false);
+
+    // A row an older manager (or a hand edit) got past install is inert on the serving path too.
+    const loaded = await loadCapsule(capsulePath, { trust: false, homeDir: home });
+    const dest = installedCapsulePath(loaded.capsuleId, home);
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(capsulePath, dest);
+    addInstalledCapsule(
+      loaded.capsuleId,
+      { name: "a.b", version: "1.0.0", file: dest, installedAt: new Date().toISOString() },
+      home,
+    );
+    server.invalidateCache();
+
+    const listRes = await server.handleMessage(rpc("tools/list"));
+    const toolNames = (listRes as { result: { tools: Array<{ name: string }> } }).result.tools.map((t) => t.name);
+    assert.deepEqual(
+      toolNames.filter((n) => n.startsWith("a.b")),
+      [],
+    );
+    assert.ok(warnings.some((w) => w.includes("not a legal gateway namespace")));
+
+    for (const name of ["a.b__greet", "a.b__capsule_info"]) {
+      const callRes = await server.handleMessage(rpc("tools/call", { name, arguments: { name: "Ada" } }));
+      assert.ok(callRes && "error" in callRes);
+      assert.equal(callRes.error.code, JSON_RPC_ERROR.InvalidParams);
+    }
+
+    const capsuleList = await server.handleMessage(rpc("tools/call", { name: "capsule_list", arguments: {} }));
+    const rows = (
+      capsuleList as { result: { structuredContent: { capsules: Array<{ name: string; tools: string[]; note?: string }> } } }
+    ).result.structuredContent.capsules;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.name, "a.b");
     assert.deepEqual(rows[0]!.tools, []);
     assert.match(rows[0]!.note ?? "", /suppressed/);
   });
