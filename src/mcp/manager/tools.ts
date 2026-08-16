@@ -4,6 +4,7 @@ import { exportMcpb } from "../../commands/export-mcpb.ts";
 import { asRecord } from "../../core/canonical.ts";
 import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
+import type { Manifest } from "../../format/manifest.ts";
 import { BUILTIN_TOOLS } from "../builtin.ts";
 import { assertNoToolNameCollision, buildToolList, type CatalogTool } from "../catalog.ts";
 import { declaredCapabilities } from "../server.ts";
@@ -128,6 +129,11 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
           description:
             "Explicitly allow installing a capsule despite suspicious prompt injection markers or formatting in descriptions/schemas.",
         },
+        accept_drift: {
+          type: "boolean",
+          description:
+            "Explicitly accept re-pinning the tool catalog when a capsule of this name is already pinned to a different one.",
+        },
       },
     },
     effects: [],
@@ -202,6 +208,11 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
           description:
             "Explicitly allow installing a capsule despite suspicious prompt injection markers or formatting in descriptions/schemas.",
         },
+        accept_drift: {
+          type: "boolean",
+          description:
+            "Explicitly accept re-pinning this capsule's tool catalog when the update changes the tools it declares.",
+        },
       },
     },
     effects: [],
@@ -210,7 +221,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
     name: "capsule_test_tool",
     title: "Test Capsule Tool",
     description:
-      "Execute a single sandboxed invocation of a tool in an installed capsule or workspace to verify output and journal effects before finalizing.",
+      "Run one sandboxed invocation of a tool in an installed capsule and answer exactly as a real call to that tool would — same output, same run id and journaled effect count — so a capsule can be checked before telling the user it works.",
     inputSchema: {
       type: "object",
       required: ["tool"],
@@ -325,6 +336,107 @@ export type InstallLoadedOptions = {
   shareHint?: string;
 };
 
+/**
+ * Every reason this host refuses a capsule by reading its manifest alone: a name the gateway cannot
+ * namespace, two tool names one human reads as one name, and text that screens as prompt injection.
+ * `undefined` means it found nothing.
+ *
+ * Both roads into installation come through here, and for the authoring road *when* matters as much as
+ * what: `loadCapsule` pins the name's key and tool catalog on first use, so a draft refused after that
+ * load would leave a pin describing bytes this host never accepted — and the corrected draft, with the
+ * offending description gone, would then read as tool-catalog drift. So authoring screens the manifest
+ * it assembled before it packs and signs anything, and `installLoadedCapsule` screens the verified
+ * manifest of a file that came from somewhere else. Same findings, same sentence, either way.
+ */
+export function screenManifest(
+  manifest: Manifest,
+  opts: { allowSuspicious: boolean; retry: string },
+): ToolExecutionResult | undefined {
+  const name = manifest.meta.name;
+
+  // The gateway prefixes every tool with this name, so a name outside the namespace alphabet is
+  // refused before the file is copied anywhere. Safe to interpolate: capsule.json already limits
+  // `meta.name` to `[a-z0-9._-]`, and it is the `.` this rejects.
+  if (!GATEWAY_NAME_PATTERN.test(name)) {
+    const text =
+      `Capsule '${name}' cannot be served by the gateway: its name must match ` +
+      `[a-zA-Z0-9_-] (1-64 characters) so that '<capsuleName>__<toolName>' names one capsule ` +
+      `unambiguously. Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
+  }
+
+  // Refused at the door, exactly as the direct server refuses such a capsule before it serves
+  // anything: two tool names that read as one name are a phishing vector inside the capsule's own
+  // list, and `<capsuleName>__` prefixes both halves of the pair alike, so the gateway namespace
+  // inherits the ambiguity. Not overridable — there is no honest reason to declare both. Built-ins
+  // join the check because the reserved-prefix rule is case-sensitive (`Capsule_info` is legal).
+  // Names are `[a-zA-Z0-9_-]{1,64}` per schema, so the reported pair is safe to interpolate.
+  try {
+    assertNoToolNameCollision([
+      ...manifest.tools.map((tool) => tool.name),
+      ...BUILTIN_TOOLS.map((tool) => tool.name),
+    ]);
+  } catch (err) {
+    const detail = err instanceof CapsuleError ? err.message : String(err);
+    const text =
+      `Security Alert (Confusable Tool Names): Capsule '${name}' declares two tool ` +
+      `names that read as the same name (${detail}). Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
+  }
+
+  // The catalog build is the screen: it is the same pass that decides what a model would be shown, so
+  // a finding here is a finding about text the agent would have read. `meta` is scanned too, since the
+  // title and description reach the model through `capsule_list` and the install summary.
+  const findings: string[] = [];
+  buildToolList(manifest, { allowSuspicious: false, warn: (line) => findings.push(line) });
+  const metaMarkers = scanTextTree([manifest.meta.title, manifest.meta.description]);
+  if (metaMarkers.length > 0) {
+    findings.push(`metadata: ${metaMarkers.join(", ")}`);
+  }
+  if (findings.length > 0 && !opts.allowSuspicious) {
+    const text =
+      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${findings.join("; ")}). ` +
+      `To install anyway, re-run ${opts.retry}.`;
+    return {
+      text,
+      structured: { ok: false, error: "E_SUSPICIOUS", findings, message: text },
+      isError: true,
+    };
+  }
+
+  return undefined;
+}
+
+/**
+ * A `loadCapsule` failure as a result the agent reads, with the two trust refusals named in plain
+ * language instead of as an E-code. `retry` names how to re-run the caller's *own* tool with the drift
+ * accepted, so an authored capsule and a downloaded one both end on a sentence the agent can act on —
+ * and neither one re-pins a changed tool catalog without the user having said so (§6-2).
+ */
+export function loadRefusal(err: unknown, retry: string): ToolExecutionResult {
+  if (err instanceof CapsuleError) {
+    if (err.code === "E_TRUST" && err.message.includes("tool catalog changed")) {
+      const name = (err.detail["name"] as string) ?? "unknown";
+      const text =
+        `Security Alert (Key Drift): The publisher key for capsule '${name}' is already pinned, but its tool catalog has changed. ` +
+        `This could indicate an unexpected modification or rug-pull. ` +
+        `If you trust this updated tool catalog, re-run ${retry}.`;
+      return { text, structured: { ok: false, error: "E_TRUST_DRIFT", message: text }, isError: true };
+    }
+    if (err.code === "E_TRUST" && err.message.includes("publisher key changed")) {
+      const name = (err.detail["name"] as string) ?? "unknown";
+      const text =
+        `Security Alert (Key Rotation): The publisher key for capsule '${name}' does not match the previously pinned key. ` +
+        `Installation refused.`;
+      return { text, structured: { ok: false, error: "E_TRUST_KEY", message: text }, isError: true };
+    }
+    const text = `${err.code}: ${err.message}`;
+    return { text, structured: { ok: false, error: err.code, message: text }, isError: true };
+  }
+  const text = `Failed to load capsule: ${err instanceof Error ? err.message : String(err)}`;
+  return { text, structured: { ok: false, error: "E_CONTAINER", message: text }, isError: true };
+}
+
 export async function installLoadedCapsule(
   loaded: LoadedCapsule,
   opts: {
@@ -345,61 +457,14 @@ export async function installLoadedCapsule(
       : "capsule_update"
     : "capsule_install";
 
-  // The gateway prefixes every tool with this name, so a name outside the namespace alphabet is
-  // refused before the file is copied anywhere. Safe to interpolate: capsule.json already limits
-  // `meta.name` to `[a-z0-9._-]`, and it is the `.` this rejects.
-  if (!GATEWAY_NAME_PATTERN.test(loaded.manifest.meta.name)) {
-    const text =
-      `Capsule '${loaded.manifest.meta.name}' cannot be served by the gateway: its name must match ` +
-      `[a-zA-Z0-9_-] (1-64 characters) so that '<capsuleName>__<toolName>' names one capsule ` +
-      `unambiguously. Installation refused.`;
-    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-  }
-
-  // Refused at the door, exactly as the direct server refuses such a capsule before it serves
-  // anything: two tool names that read as one name are a phishing vector inside the capsule's own
-  // list, and `<capsuleName>__` prefixes both halves of the pair alike, so the gateway namespace
-  // inherits the ambiguity. Not overridable — there is no honest reason to declare both. Built-ins
-  // join the check because the reserved-prefix rule is case-sensitive (`Capsule_info` is legal).
-  // Names are `[a-zA-Z0-9_-]{1,64}` per schema, so the reported pair is safe to interpolate.
-  try {
-    assertNoToolNameCollision([
-      ...loaded.manifest.tools.map((tool) => tool.name),
-      ...BUILTIN_TOOLS.map((tool) => tool.name),
-    ]);
-  } catch (err) {
-    const detail = err instanceof CapsuleError ? err.message : String(err);
-    const text =
-      `Security Alert (Confusable Tool Names): Capsule '${loaded.manifest.meta.name}' declares two tool ` +
-      `names that read as the same name (${detail}). Installation refused.`;
-    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-  }
-
-  // Screen for suspicious prompt injection markers or identifiers
-  const screeningWarnings: string[] = [];
-  buildToolList(loaded.manifest, {
-    allowSuspicious: false,
-    warn: (line) => screeningWarnings.push(line),
+  const refusal = screenManifest(loaded.manifest, {
+    allowSuspicious,
+    retry:
+      installOpts.targetFile === undefined
+        ? `${callerToolName} with { allow_suspicious: true }`
+        : `capsule_install with { path: "${installOpts.targetFile}", allow_suspicious: true }`,
   });
-
-  const metaMarkers = scanTextTree([loaded.manifest.meta.title, loaded.manifest.meta.description]);
-  if (metaMarkers.length > 0) {
-    screeningWarnings.push(`metadata: ${metaMarkers.join(", ")}`);
-  }
-
-  if (screeningWarnings.length > 0 && !allowSuspicious) {
-    const reRunMsg = installOpts.targetFile
-      ? `To install anyway, re-run capsule_install with { path: "${installOpts.targetFile}", allow_suspicious: true }.`
-      : `To install anyway, re-run ${callerToolName} with { allow_suspicious: true }.`;
-    const text =
-      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${screeningWarnings.join("; ")}). ` +
-      reRunMsg;
-    return {
-      text,
-      structured: { ok: false, error: "E_SUSPICIOUS", findings: screeningWarnings, message: text },
-      isError: true,
-    };
-  }
+  if (refusal !== undefined) return refusal;
 
   const destPath = installedCapsulePath(loaded.capsuleId, opts.homeDir);
   mkdirSync(dirname(destPath), { recursive: true });
@@ -564,27 +629,7 @@ export async function handleCapsuleInstall(
       homeDir: opts.homeDir,
     });
   } catch (err) {
-    if (err instanceof CapsuleError) {
-      if (err.code === "E_TRUST" && err.message.includes("tool catalog changed")) {
-        const name = (err.detail["name"] as string) ?? "unknown";
-        const text =
-          `Security Alert (Key Drift): The publisher key for capsule '${name}' is already pinned, but its tool catalog has changed. ` +
-          `This could indicate an unexpected modification or rug-pull. ` +
-          `If you trust this updated tool catalog, re-run capsule_install with { path: "${targetFile}", accept_drift: true }.`;
-        return { text, structured: { ok: false, error: "E_TRUST_DRIFT", message: text }, isError: true };
-      }
-      if (err.code === "E_TRUST" && err.message.includes("publisher key changed")) {
-        const name = (err.detail["name"] as string) ?? "unknown";
-        const text =
-          `Security Alert (Key Rotation): The publisher key for capsule '${name}' does not match the previously pinned key. ` +
-          `Installation refused.`;
-        return { text, structured: { ok: false, error: "E_TRUST_KEY", message: text }, isError: true };
-      }
-      const text = `${err.code}: ${err.message}`;
-      return { text, structured: { ok: false, error: err.code, message: text }, isError: true };
-    }
-    const text = `Failed to load capsule: ${err instanceof Error ? err.message : String(err)}`;
-    return { text, structured: { ok: false, error: "E_CONTAINER", message: text }, isError: true };
+    return loadRefusal(err, `capsule_install with { path: "${targetFile}", accept_drift: true }`);
   }
 
   return installLoadedCapsule(loaded, opts, {

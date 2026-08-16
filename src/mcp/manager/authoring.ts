@@ -6,27 +6,21 @@ import { asRecord } from "../../core/canonical.ts";
 import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, packDirectory, type LoadedCapsule, type PackResult } from "../../format/capsule.ts";
 import { parseManifest, type EffectName, type Manifest, type ManifestTool } from "../../format/manifest.ts";
-import { homeSidecarPaths, invokeTool } from "../../runtime/invoke.ts";
-import { openJournal } from "../../runtime/journal.ts";
 import { capsuleHome } from "../../security/signing.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
+import { loadInstalledStore } from "./registry.ts";
 import {
-  installedCapsulePath,
-  loadInstalledStore,
-} from "./registry.ts";
-import {
-  AUTHORING_TOOLS,
-  GATEWAY_NAME_PATTERN,
   installLoadedCapsule,
+  loadRefusal,
+  screenManifest,
   type ToolExecutionResult,
 } from "./tools.ts";
-
-export { AUTHORING_TOOLS };
 
 /** Maximum allowed payload size for conversational authoring workspace (5 MB). */
 export const MAX_WORKSPACE_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
-/** Maximum allowed tool runtime timeout in ms (30 seconds). */
+/** The `runtime.timeout_ms` an authored capsule gets. The plan's ceiling, and the tool takes no
+ * timeout from the caller, so no authored capsule can ask for longer than this. */
 export const MAX_AUTHORING_TIMEOUT_MS = 30_000;
 
 export function workspacesDir(homeDir: string = capsuleHome()): string {
@@ -54,19 +48,12 @@ export type ManagerAuthoringOptions = {
   servedTools: (capsuleId: string) => Promise<string[]>;
 };
 
-const VALID_EFFECTS: readonly EffectName[] = [
-  "clock.now",
-  "random.bytes",
-  "sql.query",
-  "sql.exec",
-  "kv.get",
-  "kv.set",
-  "net.fetch",
-  "log.write",
-  "pack.write",
-];
-
-const HOST_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+/**
+ * The capsule name alphabet this tool accepts: the schema's `meta.name` pattern minus `.`, which is
+ * also the gateway namespace alphabet. Checked here rather than left to `parseManifest`, because the
+ * name becomes a directory under `workspaces/` before any manifest is parsed.
+ */
+const AUTHORED_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export async function handleCapsuleCreate(
   rawArgs: unknown,
@@ -123,7 +110,7 @@ async function executeAuthoringPipeline(
     throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "capsule_create requires 'name'");
   }
 
-  if (!GATEWAY_NAME_PATTERN.test(name) || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+  if (!AUTHORED_NAME_PATTERN.test(name)) {
     const text =
       `Invalid capsule name '${name}': must match ^[a-z0-9][a-z0-9_-]{0,63}$ ` +
       `(lowercase alphanumeric, underscores, hyphens, 1-64 characters).`;
@@ -144,7 +131,10 @@ async function executeAuthoringPipeline(
   let version = typeof args["version"] === "string" ? args["version"].trim() : undefined;
   if (!version) {
     if (isUpdate) {
-      const currentVer = existingManifest?.meta.version ?? existingEntry?.version ?? "0.1.0";
+      // The bump counts from what is *installed*, and only falls back to the workspace when nothing
+      // is: the workspace may hold a draft that was refused and never shipped, and a refused attempt
+      // must not consume a version number the user never saw.
+      const currentVer = existingEntry?.version ?? existingManifest?.meta.version ?? "0.1.0";
       version = bumpPatchVersion(currentVer);
     } else {
       version = "0.1.0";
@@ -192,8 +182,11 @@ async function executeAuthoringPipeline(
   }
 
   const tools: ManifestTool[] = [];
-  const seenToolNames = new Set<string>();
 
+  // Only the shape the assembly below dereferences is checked here. Everything a manifest may not
+  // say — an illegal or reserved or repeated tool name, an unknown effect, an `inputSchema` that is
+  // not an object schema — is `parseManifest`'s single answer below, so this tool cannot drift from
+  // the schema by holding a second copy of it.
   for (let i = 0; i < rawTools.length; i++) {
     const t = asRecord(rawTools[i]);
     if (!t) {
@@ -201,28 +194,7 @@ async function executeAuthoringPipeline(
       return { text, structured: { ok: false, error: "E_USAGE", message: text }, isError: true };
     }
     const tName = typeof t["name"] === "string" ? t["name"].trim() : "";
-    if (!tName || !/^[a-zA-Z0-9_-]{1,64}$/.test(tName)) {
-      const text = `Invalid tool name '${tName}': must match ^[a-zA-Z0-9_-]{1,64}$.`;
-      return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-    }
-    if (tName.startsWith("capsule_")) {
-      const text = `Reserved tool name '${tName}': guest tool names must not start with 'capsule_'.`;
-      return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-    }
-    if (seenToolNames.has(tName)) {
-      const text = `Duplicate tool name '${tName}' declared in capsule.`;
-      return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-    }
-    seenToolNames.add(tName);
-
     const rawEffects = Array.isArray(t["effects"]) ? t["effects"] : [];
-    for (const eff of rawEffects) {
-      if (typeof eff !== "string" || !VALID_EFFECTS.includes(eff as EffectName)) {
-        const text = `Unknown effect '${eff}' declared in tool '${tName}'.`;
-        return { text, structured: { ok: false, error: "E_MANIFEST", message: text }, isError: true };
-      }
-    }
-
     const tTitle =
       typeof t["title"] === "string" && t["title"].trim() ? t["title"].trim() : tName;
     const tDesc =
@@ -230,10 +202,6 @@ async function executeAuthoringPipeline(
         ? t["description"].trim()
         : tTitle;
     const tInputSchema = asRecord(t["inputSchema"]) ?? { type: "object" };
-    if (tInputSchema["type"] !== "object") {
-      const text = `Tool '${tName}' inputSchema must be a JSON Schema with type: 'object'.`;
-      return { text, structured: { ok: false, error: "E_MANIFEST", message: text }, isError: true };
-    }
     const tOutputSchema = asRecord(t["outputSchema"]);
 
     tools.push({
@@ -257,43 +225,13 @@ async function executeAuthoringPipeline(
   const packCap =
     rawCaps?.["pack"] === true || tools.some((t) => t.effects.includes("pack.write"));
 
-  let allowedHosts: string[] = [];
-  if (explicitCaps?.["net"] !== undefined) {
-    const netObj = asRecord(explicitCaps["net"]);
-    if (!netObj || !Array.isArray(netObj["allowed_hosts"])) {
-      const text = "capabilities.net.allowed_hosts must be an array of host strings.";
-      return { text, structured: { ok: false, error: "E_USAGE", message: text }, isError: true };
-    }
-    const rawHosts = netObj["allowed_hosts"] as unknown[];
-    if (rawHosts.length === 0) {
-      const text = "capabilities.net.allowed_hosts must be non-empty when capabilities.net is specified.";
-      return { text, structured: { ok: false, error: "E_USAGE", message: text }, isError: true };
-    }
-    for (const h of rawHosts) {
-      if (typeof h !== "string" || !HOST_PATTERN.test(h)) {
-        const text =
-          `Invalid host pattern '${h}' in allowed_hosts. Must be a valid domain or *.domain pattern without standalone wildcard.`;
-        return { text, structured: { ok: false, error: "E_USAGE", message: text }, isError: true };
-      }
-    }
-    allowedHosts = rawHosts as string[];
-  } else if (existingManifest?.capabilities.net.allowed_hosts) {
-    allowedHosts = existingManifest.capabilities.net.allowed_hosts;
-  }
-
-  const usesNet = tools.some((t) => t.effects.includes("net.fetch"));
-  if (usesNet && allowedHosts.length === 0) {
-    const text =
-      "Tool requests net.fetch but no allowed_hosts were declared in capabilities.net. Creation refused.";
-    return { text, structured: { ok: false, error: "E_MANIFEST", message: text }, isError: true };
-  }
-
-  // 4. Guardrail: Timeout limit
-  const timeoutMs = 30000;
-  if (timeoutMs > MAX_AUTHORING_TIMEOUT_MS) {
-    const text = `timeout_ms cannot exceed ${MAX_AUTHORING_TIMEOUT_MS}ms.`;
-    return { text, structured: { ok: false, error: "E_USAGE", message: text }, isError: true };
-  }
+  // The hosts the caller listed, verbatim — this tool never invents a host or widens one to a
+  // wildcard (§6-6). Their shape is `parseManifest`'s business: it owns the host pattern, and it is
+  // also what refuses a tool that declares `net.fetch` with no host to fetch from.
+  const allowedHosts: unknown =
+    explicitCaps?.["net"] === undefined
+      ? existingManifest?.capabilities.net.allowed_hosts ?? []
+      : asRecord(explicitCaps["net"])?.["allowed_hosts"] ?? [];
 
   // Build manifest object
   const manifestObj: Record<string, unknown> = {
@@ -308,7 +246,7 @@ async function executeAuthoringPipeline(
       type: "quickjs-1",
       entry: "src/main.js",
       memory_limit_mb: 64,
-      timeout_ms: timeoutMs,
+      timeout_ms: MAX_AUTHORING_TIMEOUT_MS,
       determinism: "strict",
     },
     capabilities: {
@@ -334,9 +272,12 @@ async function executeAuthoringPipeline(
       : {}),
   };
 
-  // Validate manifest with Ajv and assertSemantics
+  // The one manifest gate: the schema and its semantics, in the one place this project keeps them.
+  const toolName = isUpdate ? "capsule_update" : "capsule_create";
+  const allowSuspicious = args["allow_suspicious"] === true;
+  let manifest: Manifest;
   try {
-    parseManifest(manifestObj);
+    manifest = parseManifest(manifestObj);
   } catch (err) {
     const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
     const text = `Manifest validation failed: ${detail}`;
@@ -346,6 +287,17 @@ async function executeAuthoringPipeline(
       isError: true,
     };
   }
+
+  // Screened here, on the manifest that was just assembled, and not one step later: a refusal after
+  // the capsule is signed and loaded would already have pinned this name's key and tool catalog, so
+  // the corrected draft — the flagged description removed — would come back as tool-catalog drift and
+  // the agent would have no way to clear the finding. Nothing is written, packed or pinned until this
+  // returns clean. `installLoadedCapsule` runs the same screen on the verified manifest.
+  const refusal = screenManifest(manifest, {
+    allowSuspicious,
+    retry: `${toolName} with { allow_suspicious: true }`,
+  });
+  if (refusal !== undefined) return refusal;
 
   // Total workspace payload size check
   const totalPayloadSize =
@@ -382,25 +334,8 @@ async function executeAuthoringPipeline(
     };
   }
 
-  // Load and verify
-  let loaded: LoadedCapsule;
-  try {
-    loaded = await loadCapsule(packRes.file, {
-      trust: true,
-      acceptDrift: isUpdate,
-      homeDir: opts.homeDir,
-    });
-  } catch (err) {
-    const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
-    const text = `Failed to load packed capsule: ${detail}`;
-    return {
-      text,
-      structured: { ok: false, error: err instanceof CapsuleError ? err.code : "E_TRUST", message: text },
-      isError: true,
-    };
-  }
-
-  // Run conformance suite
+  // Run the conformance suite. It examines the file without pinning it (`trust: false` inside), which
+  // is what lets a capsule be judged before this host commits to its identity.
   let report: ConformanceReport;
   try {
     report = await runConformance(packRes.file, { homeDir: opts.homeDir });
@@ -431,125 +366,28 @@ async function executeAuthoringPipeline(
     };
   }
 
+  // Verified with the trust store live, and last: this is the step that pins, so by the time it runs
+  // every refusal this tool can make has already been made. Drift is the same decision here as it is
+  // for a downloaded capsule — a named `accept_drift`, never implied by the fact that this is an
+  // update (§6-2). An update that only changes its source does not drift: the pin is over the tool
+  // catalog, so only a change to the tools themselves needs the flag.
+  const acceptDrift = args["accept_drift"] === true;
+  let loaded: LoadedCapsule;
+  try {
+    loaded = await loadCapsule(packRes.file, {
+      trust: true,
+      acceptDrift,
+      homeDir: opts.homeDir,
+    });
+  } catch (err) {
+    return loadRefusal(err, `${toolName} with { accept_drift: true }`);
+  }
+
   // Install into manager registry via the shared P2-2 install pipeline
-  const allowSuspicious = args["allow_suspicious"] === true;
   return installLoadedCapsule(loaded, opts, {
     allowSuspicious,
     actionWord: isUpdate ? "Updated" : "Created",
     exportMcpb: true,
     shareHint: "Send the .mcpb file (or .capsule) — recipients can double-click it to install.",
   });
-}
-
-export async function handleCapsuleTestTool(
-  rawArgs: unknown,
-  opts: ManagerAuthoringOptions,
-): Promise<ToolExecutionResult> {
-  const args = asRecord(rawArgs) ?? {};
-  const toolName = typeof args["tool"] === "string" ? args["tool"].trim() : "";
-  const capsuleId = typeof args["capsuleId"] === "string" ? args["capsuleId"].trim() : undefined;
-  const name = typeof args["name"] === "string" ? args["name"].trim() : undefined;
-  const toolArgs = asRecord(args["args"]) ?? {};
-
-  if (!toolName) {
-    throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "capsule_test_tool requires 'tool'");
-  }
-  if (!capsuleId && !name) {
-    throw new RpcFailure(
-      JSON_RPC_ERROR.InvalidParams,
-      "capsule_test_tool requires either 'capsuleId' or 'name'",
-    );
-  }
-
-  const store = loadInstalledStore(opts.homeDir);
-  let targetFile: string | undefined;
-
-  if (capsuleId) {
-    const entry = store.capsules[capsuleId];
-    if (entry?.file && existsSync(entry.file)) {
-      targetFile = entry.file;
-    } else {
-      const fallbackPath = installedCapsulePath(capsuleId, opts.homeDir);
-      if (existsSync(fallbackPath)) targetFile = fallbackPath;
-    }
-  } else if (name) {
-    const entry = Object.values(store.capsules).find((e) => e.name === name);
-    if (entry?.file && existsSync(entry.file)) {
-      targetFile = entry.file;
-    }
-  }
-
-  if (!targetFile) {
-    const text = `Capsule '${capsuleId || name}' is not installed.`;
-    return {
-      text,
-      structured: { ok: false, error: "E_USAGE", message: text },
-      isError: true,
-    };
-  }
-
-  let loaded: LoadedCapsule;
-  try {
-    loaded = await loadCapsule(targetFile, { trust: true, homeDir: opts.homeDir });
-  } catch (err) {
-    const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
-    const text = `Failed to load capsule: ${detail}`;
-    return {
-      text,
-      structured: { ok: false, error: "E_CONTAINER", message: detail },
-      isError: true,
-    };
-  }
-
-  const sidecars = homeSidecarPaths(loaded.capsuleId, opts.homeDir);
-  const res = await invokeTool({
-    capsule: loaded,
-    tool: toolName,
-    args: toolArgs,
-    statePath: sidecars.app,
-    journalPath: sidecars.journal,
-    homeDir: opts.homeDir,
-  });
-
-  let runEffects: unknown[] = [];
-  try {
-    const journal = openJournal(sidecars.journal);
-    runEffects = journal.effects(res.runId);
-    journal.close();
-  } catch {
-    // Best-effort journal reading
-  }
-
-  if (res.ok) {
-    const outputText =
-      typeof res.value === "string" ? res.value : JSON.stringify(res.value, null, 2);
-    const text = `Tool '${toolName}' executed successfully in ${res.ms}ms.\nOutput:\n${outputText}`;
-    return {
-      text,
-      structured: {
-        ok: true,
-        output: res.value,
-        effects: runEffects,
-        runId: res.runId,
-        ms: res.ms,
-        message: text,
-      },
-      isError: false,
-    };
-  } else {
-    const errorMsg = res.error ? `${res.error.code}: ${res.error.message}` : "Invocation failed";
-    const text = `Tool '${toolName}' execution failed (${res.ms}ms):\n${errorMsg}`;
-    return {
-      text,
-      structured: {
-        ok: false,
-        error: errorMsg,
-        effects: runEffects,
-        runId: res.runId,
-        ms: res.ms,
-        message: text,
-      },
-      isError: true,
-    };
-  }
 }

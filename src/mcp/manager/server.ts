@@ -31,7 +31,6 @@ import {
 import { confusableSkeleton, sanitizeModelText } from "../../security/text.ts";
 import {
   handleCapsuleCreate,
-  handleCapsuleTestTool,
   handleCapsuleUpdate,
 } from "./authoring.ts";
 import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
@@ -322,47 +321,18 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
           servedTools,
         }),
     ],
-    [
-      "capsule_test_tool",
-      (args) =>
-        handleCapsuleTestTool(args, {
-          homeDir: opts.homeDir,
-          warn,
-          notifyListChanged,
-          invalidateCache,
-          servedTools,
-        }),
-    ],
   ]);
 
-  async function handleToolsCallGateway(params: unknown): Promise<Record<string, unknown>> {
-    const request = asRecord(params);
-    const fullName = request?.["name"];
-    if (typeof fullName !== "string" || fullName === "") {
-      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call needs a non-empty string name");
-    }
-
-    const managerTool = managerTools.get(fullName);
-    if (managerTool !== undefined) {
-      const res = await managerTool(request?.["arguments"]);
-      return result({
-        content: [{ type: "text", text: res.text }],
-        structuredContent: res.structured,
-        isError: res.isError,
-      });
-    }
-
-    // Gateway dispatch reads the routing table the merged catalog was built from, so the name the
-    // model saw is the name that resolves: no prefix guessing, and a tool the catalog withheld — a
-    // suppressed tool, a suppressed capsule, an unverifiable file — is not reachable by name either.
-    const route = (await buildGateway()).routes.get(fullName);
-    if (route === undefined) {
-      throw new RpcFailure(
-        JSON_RPC_ERROR.InvalidParams,
-        `unknown tool: ${sanitizeModelText(fullName, 120)}`,
-      );
-    }
-
+  /**
+   * One routed call, from the route the merged catalog was built from all the way to the envelope the
+   * client reads. Both addressing schemes end here — the gateway name a client calls and the
+   * capsule/tool pair `capsule_test_tool` names — so an authored tool answers an author exactly as it
+   * will answer everyone else: same `_meta`, same consent flow, same `isError`.
+   */
+  async function callCapsuleTool(
+    route: GatewayRoute,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     const loaded = route.loaded;
     const sidecars = homeSidecarPaths(loaded.capsuleId, opts.homeDir);
     const ctx: McpServerContext = {
@@ -382,7 +352,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION && !clientElicitation,
     };
 
-    const callParams = { ...(request ?? {}), name: route.innerName };
+    const callParams = { ...params, name: route.innerName };
     const initialRes = await handleToolsCall(callParams, ctx);
     if (initialRes["resultType"] !== INPUT_REQUIRED || !clientElicitation) {
       return initialRes;
@@ -423,6 +393,83 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     return retryRes["resultType"] === INPUT_REQUIRED
       ? policyRefusal(ctx, Object.keys(asRecord(retryRes["inputRequests"]) ?? {}), "unresolved")
       : retryRes;
+  }
+
+  /**
+   * `capsule_test_tool` addresses a served tool by capsule and tool name instead of by its gateway
+   * name, and is answered by the very same dispatch — which is the whole of its promise: what an
+   * author sees while iterating is what a client will see, down to the `_meta`. Nothing here decides
+   * anything about the run; a tool the catalog withheld is not testable either, because the route
+   * table is the catalog.
+   */
+  async function handleTestTool(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const args = asRecord(request["arguments"]) ?? {};
+    const tool = typeof args["tool"] === "string" ? args["tool"].trim() : "";
+    const capsuleId = typeof args["capsuleId"] === "string" ? args["capsuleId"].trim() : undefined;
+    const name = typeof args["name"] === "string" ? args["name"].trim() : undefined;
+    if (tool === "") {
+      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "capsule_test_tool requires 'tool'");
+    }
+    if (capsuleId === undefined && name === undefined) {
+      throw new RpcFailure(
+        JSON_RPC_ERROR.InvalidParams,
+        "capsule_test_tool requires either 'capsuleId' or 'name'",
+      );
+    }
+
+    const route = [...(await buildGateway()).routes.values()].find(
+      (candidate) =>
+        candidate.innerName === tool &&
+        (capsuleId === undefined
+          ? candidate.loaded.manifest.meta.name === name
+          : candidate.loaded.capsuleId === capsuleId),
+    );
+    if (route === undefined) {
+      throw new RpcFailure(
+        JSON_RPC_ERROR.InvalidParams,
+        `no served tool '${sanitizeModelText(tool, 120)}' in installed capsule ` +
+          `'${sanitizeModelText(capsuleId ?? name ?? "", 120)}'`,
+      );
+    }
+
+    return callCapsuleTool(route, { ...request, arguments: args["args"] ?? {} });
+  }
+
+  async function handleToolsCallGateway(params: unknown): Promise<Record<string, unknown>> {
+    const request = asRecord(params);
+    const fullName = request?.["name"];
+    if (typeof fullName !== "string" || fullName === "") {
+      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call needs a non-empty string name");
+    }
+
+    // Not in `managerTools`: its answer is a capsule's answer, not the manager's, so it is not a
+    // `ToolExecutionResult` the manager wraps in its own identity.
+    if (fullName === "capsule_test_tool") {
+      return handleTestTool(request ?? {});
+    }
+
+    const managerTool = managerTools.get(fullName);
+    if (managerTool !== undefined) {
+      const res = await managerTool(request?.["arguments"]);
+      return result({
+        content: [{ type: "text", text: res.text }],
+        structuredContent: res.structured,
+        isError: res.isError,
+      });
+    }
+
+    // Gateway dispatch reads the routing table the merged catalog was built from, so the name the
+    // model saw is the name that resolves: no prefix guessing, and a tool the catalog withheld — a
+    // suppressed tool, a suppressed capsule, an unverifiable file — is not reachable by name either.
+    const route = (await buildGateway()).routes.get(fullName);
+    if (route === undefined) {
+      throw new RpcFailure(
+        JSON_RPC_ERROR.InvalidParams,
+        `unknown tool: ${sanitizeModelText(fullName, 120)}`,
+      );
+    }
+
+    return callCapsuleTool(route, request ?? {});
   }
 
   const handlers = new Map<string, RpcHandler>([

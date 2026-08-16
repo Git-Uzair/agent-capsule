@@ -10,6 +10,9 @@ import {
   loadInstalledStore,
 } from "../src/mcp/manager/registry.ts";
 import { workspaceDir } from "../src/mcp/manager/authoring.ts";
+import { homeSidecarPaths } from "../src/runtime/invoke.ts";
+import { openJournal } from "../src/runtime/journal.ts";
+import { loadTrustStore } from "../src/security/trust.ts";
 import { JSON_RPC_ERROR, type JsonRpcRequest } from "../src/mcp/transport.ts";
 import { SERVER_INFO_META } from "../src/mcp/server.ts";
 
@@ -259,12 +262,12 @@ test("Manager Authoring: capsule_create with ui_html and kv capability", async (
   });
 });
 
-test("Manager Authoring: capsule_test_tool tests tool execution and inspects journal effects", async () => {
+test("Manager Authoring: capsule_test_tool answers in the gateway's own envelope and journals the run", async () => {
   await withHome(async (home, downloads) => {
     const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
 
     // Create a capsule first
-    await server.handleMessage(
+    const createRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_create",
         arguments: {
@@ -294,6 +297,8 @@ test("Manager Authoring: capsule_test_tool tests tool execution and inspects jou
         },
       }),
     );
+    const capsuleId = (createRes as { result: { structuredContent: { capsuleId: string } } }).result
+      .structuredContent.capsuleId;
 
     // Test tool via capsule_test_tool by name
     const testRes = await server.handleMessage(
@@ -309,24 +314,45 @@ test("Manager Authoring: capsule_test_tool tests tool execution and inspects jou
 
     assert.ok(testRes && "result" in testRes);
     const testResult = testRes.result as {
+      resultType: string;
       isError: boolean;
-      structuredContent: {
-        ok: boolean;
-        output: { echo: string; timestamp: number };
-        effects: Array<{ op: string }>;
-        runId: string;
-      };
+      structuredContent: { echo: string; timestamp: number };
+      content: Array<{ text: string }>;
+      _meta: { runId: string; effects: number; events: number; [key: string]: unknown };
     };
 
+    // The same shape a gateway call answers in: the raw tool value in structuredContent, the run's
+    // identity in _meta, and the capsule's own serverInfo — not the manager's.
     assert.equal(testResult.isError, false);
-    assert.equal(testResult.structuredContent.ok, true);
-    assert.equal(testResult.structuredContent.output.echo, "hello test");
-    assert.ok(typeof testResult.structuredContent.output.timestamp === "number");
-    assert.ok(testResult.structuredContent.runId);
-    assert.ok(Array.isArray(testResult.structuredContent.effects));
-    assert.ok(testResult.structuredContent.effects.length > 0);
+    assert.equal(testResult.resultType, "complete");
+    assert.equal(testResult.structuredContent.echo, "hello test");
+    assert.equal(typeof testResult.structuredContent.timestamp, "number");
+    assert.deepEqual(testResult._meta[SERVER_INFO_META], {
+      name: "capsule/tester",
+      version: "0.1.0",
+    });
+    assert.ok(testResult._meta.runId);
+    assert.ok(testResult._meta.effects > 0);
 
-    // Test tool error when tool arguments are invalid
+    // Byte-for-byte the envelope the gateway name produces for the same arguments, bar the run ids.
+    const gatewayRes = await server.handleMessage(
+      rpc("tools/call", { name: "tester__ping", arguments: { msg: "hello test" } }),
+    );
+    const gatewayResult = (gatewayRes as { result: Record<string, unknown> }).result;
+    assert.deepEqual(Object.keys(gatewayResult).sort(), Object.keys(testResult).sort());
+    assert.deepEqual(gatewayResult["_meta"], {
+      ...testResult._meta,
+      runId: (gatewayResult["_meta"] as { runId: string }).runId,
+    });
+
+    // The run really was journaled under CAPSULE_HOME, effects and all.
+    const journal = openJournal(homeSidecarPaths(capsuleId, home).journal);
+    const effects = journal.effects(testResult._meta.runId);
+    journal.close();
+    assert.ok(effects.some((effect) => effect.op === "kv.set"));
+
+    // Arguments that do not fit the author's inputSchema are the caller's protocol mistake: nothing
+    // ran, so there is no result for a model to act on.
     const invalidArgsRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_test_tool",
@@ -337,10 +363,10 @@ test("Manager Authoring: capsule_test_tool tests tool execution and inspects jou
         },
       }),
     );
-    assert.ok(invalidArgsRes && "result" in invalidArgsRes);
-    assert.equal((invalidArgsRes.result as { isError: boolean }).isError, true);
+    assert.ok(invalidArgsRes && "error" in invalidArgsRes);
+    assert.equal(invalidArgsRes.error.code, JSON_RPC_ERROR.InvalidParams);
 
-    // Test tool error when capsule is not found
+    // Same for a capsule that is not installed, or a tool the gateway does not serve.
     const notFoundRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_test_tool",
@@ -350,12 +376,12 @@ test("Manager Authoring: capsule_test_tool tests tool execution and inspects jou
         },
       }),
     );
-    assert.ok(notFoundRes && "result" in notFoundRes);
-    assert.equal((notFoundRes.result as { isError: boolean }).isError, true);
+    assert.ok(notFoundRes && "error" in notFoundRes);
+    assert.equal(notFoundRes.error.code, JSON_RPC_ERROR.InvalidParams);
   });
 });
 
-test("Manager Authoring: capsule_update updates tools, bumps version, re-signs, and re-serves", async () => {
+test("Manager Authoring: capsule_update re-signs a source-only change, and re-pins a changed tool catalog only with accept_drift", async () => {
   await withHome(async (home, downloads) => {
     const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
 
@@ -388,40 +414,84 @@ test("Manager Authoring: capsule_update updates tools, bumps version, re-signs, 
     const createId = (createRes as { result: { structuredContent: { capsuleId: string } } }).result
       .structuredContent.capsuleId;
 
-    // Update capsule: add farewell tool, bump version automatically
-    const updateRes = await server.handleMessage(
+    const greetTool = {
+      name: "greet",
+      title: "Greet user",
+      description: "Greets user.",
+      inputSchema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+      },
+    };
+    const farewellTool = {
+      name: "farewell",
+      title: "Say farewell",
+      description: "Says goodbye.",
+      inputSchema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"],
+      },
+    };
+
+    // The everyday iteration: the source changes, the tool catalog does not. The pin is over the
+    // catalog, so this needs no flag and no decision from the user.
+    const sourceOnlyRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_update",
         arguments: {
           name: "greeter",
-          title: "Updated Greeter App",
           source: `globalThis.tools = {
-            greet({ name }) { return { text: "Hello " + name }; },
-            farewell({ name }) { return { text: "Goodbye " + name }; }
+            greet({ name }) { return { text: "Hi " + name }; }
           };`,
-          tools: [
-            {
-              name: "greet",
-              title: "Greet user",
-              description: "Greets user.",
-              inputSchema: {
-                type: "object",
-                properties: { name: { type: "string" } },
-                required: ["name"],
-              },
-            },
-            {
-              name: "farewell",
-              title: "Say farewell",
-              description: "Says goodbye.",
-              inputSchema: {
-                type: "object",
-                properties: { name: { type: "string" } },
-                required: ["name"],
-              },
-            },
-          ],
+          tools: [greetTool],
         },
+      }),
+    );
+    assert.ok(sourceOnlyRes && "result" in sourceOnlyRes);
+    const sourceOnlyResult = sourceOnlyRes.result as {
+      isError: boolean;
+      structuredContent: { ok: boolean; version: string };
+    };
+    assert.equal(sourceOnlyResult.isError, false);
+    assert.equal(sourceOnlyResult.structuredContent.version, "0.1.1");
+
+    // Adding a tool *is* catalog drift, and the author's own capsule is no exception (§6-2): the
+    // decision is named or it does not happen.
+    const driftArgs = {
+      name: "greeter",
+      title: "Updated Greeter App",
+      source: `globalThis.tools = {
+        greet({ name }) { return { text: "Hi " + name }; },
+        farewell({ name }) { return { text: "Goodbye " + name }; }
+      };`,
+      tools: [greetTool, farewellTool],
+    };
+
+    const refusedRes = await server.handleMessage(
+      rpc("tools/call", { name: "capsule_update", arguments: driftArgs }),
+    );
+    assert.ok(refusedRes && "result" in refusedRes);
+    const refusedResult = refusedRes.result as {
+      isError: boolean;
+      structuredContent: { ok: boolean; error: string; message: string };
+    };
+    assert.equal(refusedResult.isError, true);
+    assert.equal(refusedResult.structuredContent.error, "E_TRUST_DRIFT");
+    assert.ok(refusedResult.structuredContent.message.includes("accept_drift: true"));
+
+    // The refusal changed nothing: still 0.1.1, still one tool served.
+    const afterRefusal = loadInstalledStore(home);
+    assert.deepEqual(
+      Object.values(afterRefusal.capsules).map((entry) => entry.version),
+      ["0.1.1"],
+    );
+
+    const updateRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_update",
+        arguments: { ...driftArgs, accept_drift: true },
       }),
     );
 
@@ -433,6 +503,7 @@ test("Manager Authoring: capsule_update updates tools, bumps version, re-signs, 
         name: string;
         version: string;
         capsuleId: string;
+        trust: string;
         tools: string[];
       };
     };
@@ -440,15 +511,16 @@ test("Manager Authoring: capsule_update updates tools, bumps version, re-signs, 
     assert.equal(updateResult.isError, false);
     assert.equal(updateResult.structuredContent.ok, true);
     assert.equal(updateResult.structuredContent.name, "greeter");
-    // Version bumped from 0.1.0 -> 0.1.1
-    assert.equal(updateResult.structuredContent.version, "0.1.1");
+    // Version bumped from 0.1.1 -> 0.1.2
+    assert.equal(updateResult.structuredContent.version, "0.1.2");
+    assert.equal(updateResult.structuredContent.trust, "drift-accepted");
     assert.notEqual(updateResult.structuredContent.capsuleId, createId);
 
     // Verify registry updated
     const store = loadInstalledStore(home);
     assert.equal(Object.keys(store.capsules).length, 1);
     assert.ok(store.capsules[updateResult.structuredContent.capsuleId]);
-    assert.equal(store.capsules[updateResult.structuredContent.capsuleId]!.version, "0.1.1");
+    assert.equal(store.capsules[updateResult.structuredContent.capsuleId]!.version, "0.1.2");
 
     // Verify gateway serves both tools
     const listRes = await server.handleMessage(rpc("tools/list"));
@@ -544,7 +616,7 @@ test("Manager Authoring Guardrails: invalid capsule name and reserved tool name 
     assert.equal((confusableRes.result as { isError: boolean }).isError, true);
     assert.equal(
       (confusableRes.result as { structuredContent: { error: string } }).structuredContent.error,
-      "E_CONFORMANCE",
+      "E_CONTENT",
     );
 
     // 5. Confusable tool name colliding with built-in tools
@@ -591,7 +663,8 @@ test("Manager Authoring Guardrails: net.fetch requires allowed_hosts and rejects
       "E_MANIFEST",
     );
 
-    // 2. Invalid standalone wildcard in allowed_hosts
+    // 2. Invalid standalone wildcard in allowed_hosts — refused by the schema's host pattern, the one
+    // place this project spells out what a host may look like.
     const wildcardRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_create",
@@ -607,7 +680,11 @@ test("Manager Authoring Guardrails: net.fetch requires allowed_hosts and rejects
     assert.equal((wildcardRes.result as { isError: boolean }).isError, true);
     assert.equal(
       (wildcardRes.result as { structuredContent: { error: string } }).structuredContent.error,
-      "E_USAGE",
+      "E_MANIFEST",
+    );
+    assert.match(
+      (wildcardRes.result as { structuredContent: { message: string } }).structuredContent.message,
+      /must match pattern/,
     );
   });
 });
@@ -773,7 +850,7 @@ test("CLI Manager: conversational capsule_create and execution over stdio preser
   });
 });
 
-test("Manager Authoring Guardrails: suspicious prompt injection markers rejected with E_SUSPICIOUS unless allow_suspicious: true", async () => {
+test("Manager Authoring Guardrails: a refused draft is not pinned, so the corrected draft installs", async () => {
   await withHome(async (home, downloads) => {
     const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
 
@@ -812,7 +889,46 @@ test("Manager Authoring Guardrails: suspicious prompt injection markers rejected
     const store = loadInstalledStore(home);
     assert.equal(Object.keys(store.capsules).length, 0);
 
-    // 2. Authoring with prompt injection and allow_suspicious: true succeeds
+    // Nor pinned, nor even written: the screening runs on the assembled manifest, before the capsule
+    // is packed, signed or loaded. A refusal that had pinned this name's tool catalog would send the
+    // corrected draft back as E_TRUST drift — and capsule_create has no way to clear that.
+    assert.equal(loadTrustStore(home).capsules["injected"], undefined);
+    assert.equal(existsSync(workspaceDir("injected", home)), false);
+
+    // The corrected draft — same name, flagged description removed — installs with no flags at all.
+    const correctedRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_create",
+        arguments: {
+          name: "injected",
+          title: "Injected Capsule",
+          description: "Normal description",
+          source: "globalThis.tools = { pwn() { return { ok: true }; } };",
+          tools: [
+            {
+              name: "pwn",
+              title: "Pwn tool",
+              description: "Returns ok.",
+              inputSchema: { type: "object" },
+            },
+          ],
+        },
+      }),
+    );
+    assert.ok(correctedRes && "result" in correctedRes);
+    const correctedResult = correctedRes.result as {
+      isError: boolean;
+      structuredContent: { ok: boolean; trust: string; message: string };
+    };
+    assert.equal(correctedResult.isError, false, correctedResult.structuredContent.message);
+    assert.equal(correctedResult.structuredContent.trust, "pinned");
+  });
+});
+
+test("Manager Authoring Guardrails: suspicious prompt injection markers install with allow_suspicious: true", async () => {
+  await withHome(async (home, downloads) => {
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+
     const allowRes = await server.handleMessage(
       rpc("tools/call", {
         name: "capsule_create",
