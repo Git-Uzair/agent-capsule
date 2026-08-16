@@ -123,6 +123,13 @@ function rpc(method: string, params?: unknown): JsonRpcRequest {
   return { jsonrpc: "2.0", id: nextId, method, ...(params === undefined ? {} : { params }) };
 }
 
+/** The installed file as the registry records it — the same source of truth the serving path reads. */
+function installedFileOf(capsuleId: string, home: string): string {
+  const entry = loadInstalledStore(home).capsules[capsuleId];
+  assert.ok(entry, `no installed entry for ${capsuleId}`);
+  return entry.file;
+}
+
 test("Manager server: handshake, discover, ping, and initial tools/list", async () => {
   await withHome(async (home, downloads) => {
     const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
@@ -219,9 +226,10 @@ test("Manager server: capsule_install by path and gateway tool execution", async
     assert.ok(store.capsules[capsuleId]);
     assert.equal(store.capsules[capsuleId].name, "hello");
 
-    // Check copied file
-    const installedFile = installedCapsulePath(capsuleId, home);
+    // Check copied file — mirrored under a name a human can read, not the capsuleId.
+    const installedFile = store.capsules[capsuleId].file;
     assert.ok(existsSync(installedFile));
+    assert.ok(installedFile.endsWith("hello-1.0.0.capsule"), installedFile);
 
     // Check tools/list now includes gateway tools
     const listRes = await server.handleMessage(rpc("tools/list"));
@@ -553,7 +561,7 @@ test("Manager server: re-installing / updating capsule with same name replaces r
       rpc("tools/call", { name: "capsule_install", arguments: { path: path1 } }),
     );
     const id1 = (install1 as { result: { structuredContent: { capsuleId: string } } }).result.structuredContent.capsuleId;
-    const file1 = installedCapsulePath(id1, home);
+    const file1 = installedFileOf(id1, home);
     assert.ok(existsSync(file1));
 
     // Install version 2.0.0 of "updater" with new tool
@@ -587,7 +595,9 @@ test("Manager server: re-installing / updating capsule with same name replaces r
     assert.ok(store.capsules[id2]);
     assert.equal(store.capsules[id2].version, "2.0.0");
     assert.equal(existsSync(file1), false);
-    assert.ok(existsSync(installedCapsulePath(id2, home)));
+    const file2 = installedFileOf(id2, home);
+    assert.ok(existsSync(file2));
+    assert.ok(file2.endsWith("updater-2.0.0.capsule"), file2);
 
     // tools/list serves updated version's tools
     const listRes = await server.handleMessage(rpc("tools/list"));
@@ -681,7 +691,7 @@ test("Manager server: capsule_list reports trust 'corrupt' with isError: false w
     const capsuleId = (installRes as { result: { structuredContent: { capsuleId: string } } }).result.structuredContent.capsuleId;
 
     // Overwrite the installed capsule file with junk
-    const targetFile = installedCapsulePath(capsuleId, home);
+    const targetFile = installedFileOf(capsuleId, home);
     writeFileSync(targetFile, "not a valid zip or capsule");
     server.invalidateCache();
 
@@ -740,7 +750,7 @@ test("Manager server: confusable tool names inside one capsule are refused and n
     // A registry row that got past install anyway (written by an older manager, or hand-edited) is
     // suppressed by the serving path too: neither name is advertised and neither is callable.
     const loaded = await loadCapsule(capsulePath, { trust: false, homeDir: home });
-    const dest = installedCapsulePath(loaded.capsuleId, home);
+    const dest = installedCapsulePath("confusable", "1.0.0", home);
     mkdirSync(dirname(dest), { recursive: true });
     cpSync(capsulePath, dest);
     addInstalledCapsule(
@@ -802,7 +812,7 @@ test("Manager server: a dotted capsule name is refused and never enters the gate
 
     // A row an older manager (or a hand edit) got past install is inert on the serving path too.
     const loaded = await loadCapsule(capsulePath, { trust: false, homeDir: home });
-    const dest = installedCapsulePath(loaded.capsuleId, home);
+    const dest = installedCapsulePath("a.b", "1.0.0", home);
     mkdirSync(dirname(dest), { recursive: true });
     cpSync(capsulePath, dest);
     addInstalledCapsule(
@@ -854,7 +864,7 @@ test("Manager server: a swapped installed file is not served under the trusted r
       const tools = manifest["tools"] as Array<Record<string, unknown>>;
       tools[0]!["name"] = "exfiltrate";
     });
-    cpSync(otherPath, installedCapsulePath(capsuleId, home));
+    cpSync(otherPath, installedFileOf(capsuleId, home));
     server.invalidateCache();
 
     const listRes = await server.handleMessage(rpc("tools/list"));

@@ -10,7 +10,7 @@ import { buildManagerMcpb, runBuildManagerMcpb } from "../src/commands/build-man
 import { exportMcpb } from "../src/commands/export-mcpb.ts";
 import { getDefaultIconPath, getDistRuntimePaths } from "../src/core/paths.ts";
 import { packDirectory } from "../src/format/capsule.ts";
-import { installedCapsulePath, loadSeededStore } from "../src/mcp/manager/registry.ts";
+import { loadInstalledStore, loadSeededStore } from "../src/mcp/manager/registry.ts";
 import { createManagerServer } from "../src/mcp/manager/server.ts";
 import { AUTHORED_NAME_PATTERN, LISTED_TRUST_STATES, listedTrust } from "../src/mcp/manager/tools.ts";
 import type { JsonRpcRequest } from "../src/mcp/transport.ts";
@@ -81,6 +81,13 @@ let nextId = 0;
 function toolCall(name: string, args: Record<string, unknown>): JsonRpcRequest {
   nextId += 1;
   return { jsonrpc: "2.0", id: nextId, method: "tools/call", params: { name, arguments: args } };
+}
+
+/** The installed file as the registry records it — the same source of truth the serving path reads. */
+function installedFileOf(capsuleId: string, home: string): string {
+  const entry = loadInstalledStore(home).capsules[capsuleId];
+  assert.ok(entry, `no installed entry for ${capsuleId}`);
+  return entry.file;
 }
 
 describe("capsule build-manager-mcpb", () => {
@@ -683,7 +690,7 @@ describe("capsule build-manager-mcpb", () => {
 
       // And the state a broken installed file lands in is 'corrupt', which the description names as
       // the state a drifted or unverifiable-signature file reads as — not the absent 'drift'.
-      writeFileSync(installedCapsulePath(capsuleId, home), Buffer.from("not a capsule"));
+      writeFileSync(installedFileOf(capsuleId, home), Buffer.from("not a capsule"));
       const reopened = createManagerServer(options);
       const relisted = ((await reopened.handleMessage(toolCall("capsule_list", {}))) as { result: ListResult }).result;
       const brokenRow = relisted.structuredContent.capsules[0]!;
@@ -795,7 +802,7 @@ describe("capsule build-manager-mcpb", () => {
           tools: [peek],
         })
       ).structuredContent.capsuleId;
-      writeFileSync(installedCapsulePath(driftedId, home), readFileSync(installedCapsulePath(secondId, home)));
+      writeFileSync(installedFileOf(driftedId, home), readFileSync(installedFileOf(secondId, home)));
       const swapped = rowFor(await listRows(), driftedId);
       assert.equal(swapped.trust, "unverifiable");
       assert.deepEqual(swapped.tools, [], "an unverifiable capsule serves no tools, as the description says");
@@ -805,7 +812,7 @@ describe("capsule build-manager-mcpb", () => {
       );
 
       // 'corrupt': bytes that are not a capsule at all.
-      writeFileSync(installedCapsulePath(secondId, home), Buffer.from("not a capsule"));
+      writeFileSync(installedFileOf(secondId, home), Buffer.from("not a capsule"));
       const brokenRows = await listRows();
       assert.equal(rowFor(brokenRows, secondId).trust, "corrupt");
       assert.deepEqual(rowFor(brokenRows, secondId).tools, []);
@@ -877,7 +884,7 @@ describe("capsule build-manager-mcpb", () => {
       // checked against. The description says a listing re-reads neither while the cached verdict
       // stands, and it does not: the same verdict, the same served tools, and nothing new warned
       // because nothing was verified.
-      const keptFile = installedCapsulePath(keptId, home);
+      const keptFile = installedFileOf(keptId, home);
       const trustFile = join(home, "trust.json");
       const goodBytes = readFileSync(keptFile);
       const goodTrust = readFileSync(trustFile);

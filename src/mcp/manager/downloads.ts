@@ -8,8 +8,19 @@ export type DownloadCandidate = {
   mtime: number;
 };
 
+/**
+ * The user's Downloads folder, or the override the manager was started with (`--downloads`). One
+ * folder for capsule traffic in both directions: `capsule_install { from_downloads }` scans it for
+ * arriving capsules, and authoring drops the shareable `.mcpb` into it — because a bundle written
+ * under `~/.agent-capsule/` is a bundle the user has to be talked into finding, and "it's in your
+ * Downloads folder" is a sentence anyone can act on.
+ */
+export function resolveDownloadsDir(downloadsDir?: string): string {
+  return downloadsDir ?? join(homedir(), "Downloads");
+}
+
 export function scanDownloads(downloadsDir?: string, limit = 5): DownloadCandidate[] {
-  const dir = downloadsDir ?? join(homedir(), "Downloads");
+  const dir = resolveDownloadsDir(downloadsDir);
   if (!existsSync(dir)) {
     return [];
   }

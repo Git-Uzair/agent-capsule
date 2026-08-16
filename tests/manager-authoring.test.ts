@@ -5,10 +5,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createManagerServer } from "../src/mcp/manager/server.ts";
-import {
-  installedCapsulePath,
-  loadInstalledStore,
-} from "../src/mcp/manager/registry.ts";
+import { loadInstalledStore } from "../src/mcp/manager/registry.ts";
 import { workspaceDir } from "../src/mcp/manager/authoring.ts";
 import { homeSidecarPaths } from "../src/runtime/invoke.ts";
 import { openJournal } from "../src/runtime/journal.ts";
@@ -151,16 +148,19 @@ test("Manager Authoring: capsule_create end-to-end creates workspace, signs, con
     assert.equal(manifest.meta.version, "0.1.0");
     assert.equal(manifest.tools.length, 2);
 
-    // Verify installed file and registry
-    const installedFile = installedCapsulePath(result.structuredContent.capsuleId, home);
-    assert.ok(existsSync(installedFile));
+    // Verify installed file and registry: the mirror carries the human-readable name, and the
+    // registry row points exactly at it.
     const store = loadInstalledStore(home);
-    assert.ok(store.capsules[result.structuredContent.capsuleId]);
+    const entry = store.capsules[result.structuredContent.capsuleId];
+    assert.ok(entry);
+    assert.ok(entry.file.endsWith("calculator-0.1.0.capsule"), entry.file);
+    assert.ok(existsSync(entry.file));
 
-    // Verify .mcpb file exists and was exported unconditionally
+    // Verify .mcpb file exists and was exported unconditionally — into the Downloads folder, where
+    // a user can actually find the file the share hint tells them to send.
     assert.ok(result.structuredContent.mcpb_file);
+    assert.equal(result.structuredContent.mcpb_file, join(downloads, "calculator-0.1.0.mcpb"));
     assert.ok(existsSync(result.structuredContent.mcpb_file));
-    assert.ok(result.structuredContent.mcpb_file.endsWith(".mcpb"));
 
     // Check tools/list now includes gateway tools
     const listRes = await server.handleMessage(rpc("tools/list"));
@@ -770,7 +770,7 @@ test("Manager Authoring Guardrails: total payload size limit (5 MB) enforced", a
 });
 
 test("CLI Manager: conversational capsule_create and execution over stdio preserves 100% JSON-RPC purity", async () => {
-  await withHome(async (home) => {
+  await withHome(async (home, downloads) => {
     const lines = [
       JSON.stringify({
         jsonrpc: "2.0",
@@ -816,12 +816,18 @@ test("CLI Manager: conversational capsule_create and execution over stdio preser
       }),
     ].join("\n");
 
-    const stdout = execFileSync(process.execPath, [CLI, "manager", "--home", home], {
-      input: `${lines}\n`,
-      encoding: "utf8",
-      env: { ...process.env, CAPSULE_HOME: home },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    // `--downloads` matters even where nothing scans it: capsule_create emits the sharing bundle
+    // into the Downloads folder, and without the override that is the developer's real one.
+    const stdout = execFileSync(
+      process.execPath,
+      [CLI, "manager", "--home", home, "--downloads", downloads],
+      {
+        input: `${lines}\n`,
+        encoding: "utf8",
+        env: { ...process.env, CAPSULE_HOME: home },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
 
     const messages = stdout
       .split("\n")

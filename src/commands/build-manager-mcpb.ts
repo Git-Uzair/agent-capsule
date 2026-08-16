@@ -19,7 +19,7 @@ export const MANAGER_DESCRIPTION =
   "• Author Capsules: Create new capsules on the fly with capsule_create. Provide JavaScript guest source " +
   "defining globalThis.tools, input schemas, effects, and declared capabilities (KV store, SQLite, network hosts). " +
   "The manager runs automated conformance tests, signs the capsule with your local key, installs it into the gateway, " +
-  "and outputs a double-clickable .mcpb bundle to share with others.\n\n" +
+  "and saves a double-clickable .mcpb sharing bundle to the user's Downloads folder.\n\n" +
   "• Test & Iterate: Test capsule tools in a secure sandbox using capsule_test_tool before telling the user it is ready. " +
   "Update existing capsules with capsule_update.\n\n" +
   "• Manage: List installed capsules, publisher keys, trust state, and exposed tools with capsule_list. " +

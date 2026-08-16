@@ -27,9 +27,24 @@ export function installedCapsulesDir(homeDir: string = capsuleHome()): string {
   return join(homeDir, "capsules");
 }
 
-export function installedCapsulePath(capsuleId: string, homeDir: string = capsuleHome()): string {
-  const safeId = capsuleId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return join(installedCapsulesDir(homeDir), `${safeId}.capsule`);
+/**
+ * Where an installed capsule's bytes live: `capsules/<name>-<version>.capsule`, a name a human can
+ * read in a file listing and send onward — not the capsuleId, which is content-addressed noise to
+ * anyone but the registry. The registry KEY stays the capsuleId, and so does every trust decision:
+ * `verifyInstalled` re-derives the id from the bytes and compares it to that key, so what the file
+ * is called proves nothing. Uniqueness holds because `addInstalledCapsule` keeps at most one entry
+ * per capsule name — the replacement that installs `<name>-<new>.capsule` is the same step that
+ * unlinks `<name>-<old>.capsule`. The one same-name-same-version edge (a rebuild with different
+ * bytes under a pinned version) maps both ids to one path, and replacement handles that too: the
+ * new bytes are written first, and the unlink is skipped exactly when old and new paths are equal.
+ */
+export function installedCapsulePath(
+  name: string,
+  version: string,
+  homeDir: string = capsuleHome(),
+): string {
+  const safe = (part: string): string => part.replace(/[^a-zA-Z0-9._+-]/g, "_");
+  return join(installedCapsulesDir(homeDir), `${safe(name)}-${safe(version)}.capsule`);
 }
 
 function isInstalledEntry(value: unknown): value is InstalledEntry {

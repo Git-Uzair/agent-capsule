@@ -397,8 +397,9 @@ async function executeAuthoringPipeline(
     actionWord: isUpdate ? "Updated" : "Created",
     exportMcpb: true,
     shareHint:
-      "Send the .mcpb file — a recipient double-clicks it to install this capsule together with " +
-      "the Capsule Manager, so they can author and share capsules of their own. The bare .capsule " +
-      "file installs into an existing manager via capsule_install.",
+      "The .mcpb bundle is in the user's Downloads folder — send that one file. A recipient " +
+      "double-clicks it to install this capsule together with the Capsule Manager, so they can " +
+      "author and share capsules of their own. The bare .capsule file installs into an existing " +
+      "manager via capsule_install.",
   });
 }

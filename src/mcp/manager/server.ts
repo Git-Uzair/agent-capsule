@@ -357,6 +357,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       (args) =>
         handleCapsuleCreate(args, {
           homeDir: opts.homeDir,
+          downloadsDir: opts.downloadsDir,
           warn,
           notifyListChanged,
           invalidateCache,
@@ -368,6 +369,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       (args) =>
         handleCapsuleUpdate(args, {
           homeDir: opts.homeDir,
+          downloadsDir: opts.downloadsDir,
           warn,
           notifyListChanged,
           invalidateCache,

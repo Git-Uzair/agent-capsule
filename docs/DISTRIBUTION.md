@@ -148,7 +148,7 @@ The Capsule Manager (`capsule-manager.mcpb`) is an official platform extension p
 - **Dynamic List Changes:** The Manager advertises `tools.listChanged: true` in its capabilities and emits JSON-RPC `notifications/tools/list_changed` whenever a capsule is installed, created, updated, or removed.
 
 ### Management Registry
-Installed capsules are tracked in `~/.agent-capsule/installed.json` and mirrored in `~/.agent-capsule/capsules/<capsuleId>.capsule`.
+Installed capsules are tracked in `~/.agent-capsule/installed.json` (keyed by capsuleId) and mirrored in `~/.agent-capsule/capsules/<name>-<version>.capsule`. The human-readable file name is presentation only: verification always re-derives the payload digest from the bytes and compares it against the registry key, so a renamed or swapped file reads as `unverifiable`, never as the capsule it claims to be.
 
 ### Native Consent Elicitation
 - When a client connects via MCP `2025-06-18` (or later) and advertises elicitation capabilities, missing capability grants (`net:*`, `pack`) trigger interactive `elicitation/create` prompts in chat.

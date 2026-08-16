@@ -10,11 +10,10 @@ import { assertNoToolNameCollision, buildToolList, type CatalogTool } from "../c
 import { declaredCapabilities } from "../server.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
 import { scanTextTree } from "../../security/text.ts";
-import { scanDownloads, type DownloadCandidate } from "./downloads.ts";
+import { resolveDownloadsDir, scanDownloads, type DownloadCandidate } from "./downloads.ts";
 import {
   addInstalledCapsule,
   installedCapsulePath,
-  installedCapsulesDir,
   removeInstalledCapsule,
   removeInstalledCapsulesByName,
 } from "./registry.ts";
@@ -118,7 +117,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
     name: "capsule_create",
     title: "Create Capsule",
     description:
-      "Create, test, conform, sign, and install a brand-new Agent Capsule from guest JavaScript source code in conversation. Scaffolds the workspace, packages and signs with local key, runs automated conformance tests, installs into the gateway so tools are immediately callable under '<name>__<toolName>', and produces a double-clickable .mcpb sharing bundle.",
+      "Create, test, conform, sign, and install a brand-new Agent Capsule from guest JavaScript source code in conversation. Scaffolds the workspace, packages and signs with local key, runs automated conformance tests, installs into the gateway so tools are immediately callable under '<name>__<toolName>', and saves a double-clickable .mcpb sharing bundle to the user's Downloads folder.",
     inputSchema: {
       type: "object",
       required: ["name", "source", "tools"],
@@ -429,6 +428,8 @@ export type ToolExecutionResult = {
  */
 export type ManagerPipelineOptions = {
   homeDir?: string;
+  /** The user's Downloads override: where installs scan from and where sharing bundles are emitted. */
+  downloadsDir?: string;
   warn: (line: string) => void;
   notifyListChanged: () => void;
   invalidateCache: () => void;
@@ -568,7 +569,11 @@ export async function installLoadedCapsule(
   });
   if (refusal !== undefined) return refusal;
 
-  const destPath = installedCapsulePath(loaded.capsuleId, opts.homeDir);
+  const destPath = installedCapsulePath(
+    loaded.manifest.meta.name,
+    loaded.manifest.meta.version,
+    opts.homeDir,
+  );
   mkdirSync(dirname(destPath), { recursive: true });
   writeFileSync(destPath, loaded.bytes);
 
@@ -590,8 +595,10 @@ export async function installLoadedCapsule(
   let mcpbFile: string | undefined;
   if (installOpts.exportMcpb) {
     try {
+      // Into the user's Downloads folder, not under `~/.agent-capsule/`: this file exists to be
+      // found and sent onward, and a dotfolder is where share artifacts go to be forgotten.
       const mcpbDest = join(
-        installedCapsulesDir(opts.homeDir),
+        resolveDownloadsDir(opts.downloadsDir),
         `${loaded.manifest.meta.name}-${loaded.manifest.meta.version}.mcpb`,
       );
       // Manager-seeded on purpose: the bundle an author shares from conversation carries the
@@ -666,8 +673,7 @@ export async function installLoadedCapsule(
 
 export async function handleCapsuleInstall(
   rawArgs: unknown,
-  // `downloadsDir` is this tool's alone: it is the only road that finds the file by scanning.
-  opts: ManagerPipelineOptions & { downloadsDir?: string },
+  opts: ManagerPipelineOptions,
 ): Promise<ToolExecutionResult> {
   const args = asRecord(rawArgs) ?? {};
   const fromDownloads = args["from_downloads"] === true;

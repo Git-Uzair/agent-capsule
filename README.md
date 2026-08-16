@@ -39,7 +39,7 @@ With the **Capsule Manager** extension installed, your AI agent creates, tests, 
    > *"Build me a capsule that tracks my reading list with SQLite and lets me add, search, and rate books."*
 4. The agent writes the guest JavaScript, defines the schemas, and calls `capsule_create`.
 5. The Manager verifies the capsule, signs it with your cryptographic key, runs the 12-vector conformance suite, installs it into your local registry, and dynamically registers the tools (e.g. `readinglist__add`, `readinglist__search`) without restarting Claude Desktop.
-6. The agent hands back a shareable `.mcpb` and `.capsule` path ready to send to colleagues.
+6. The agent saves a shareable `.mcpb` into your **Downloads folder**, ready to send to colleagues.
 
 **Sharing is self-propagating:** the `.mcpb` an authored capsule emits is a *manager-seeded* bundle. A recipient who double-clicks it gets the capsule **and** the full Capsule Manager — so they can immediately author, install, and share capsules of their own. Seeded bundles all install under the single `capsule-manager` extension identity: installing a second one replaces the platform (never a duplicate gateway) while the recipient's capsule library accumulates in `~/.agent-capsule/`. A seeded capsule installs once; if the recipient uninstalls it, later restarts do not resurrect it.
 
@@ -89,7 +89,7 @@ The CLI is available as `capsule` or `agent-capsule` (via `npm install -g agent-
 | `ui` | `capsule ui <file> [--port <n>] [--timeout <min>] [--no-open]` | Start authenticated loopback HTTP server and open embedded UI or installer page. |
 | `share` | `capsule share <file> [--json] [--accept-drift]` | Generate multi-client sharing payloads, Cursor/VS Code deep links, and config snippets. |
 | `export-mcpb` | `capsule export-mcpb <file> [-o out.mcpb] [--manager]` | Export a self-contained 1-click install `.mcpb` extension bundle for Claude Desktop. `--manager` emits a manager-seeded bundle: the recipient gets the capsule plus the full Capsule Manager (authoring included). |
-| `manager` | `capsule manager [--home <dir>] [--downloads <dir>] [--seed <file>]... [--allow-suspicious]` | Run the stdio Capsule Manager gateway server multiplexing all installed capsules. `--seed` installs a bundled capsule on first run (an uninstall is never overridden). |
+| `manager` | `capsule manager [--home <dir>] [--downloads <dir>] [--seed <file>]... [--allow-suspicious]` | Run the stdio Capsule Manager gateway server multiplexing all installed capsules. `--seed` installs a bundled capsule on first run (an uninstall is never overridden). `--downloads` overrides the Downloads folder used both for `capsule_install` scanning and as the destination for authored sharing bundles. |
 | `build-manager-mcpb` | `capsule build-manager-mcpb [-o out.mcpb]` | Build the official Capsule Manager `.mcpb` bundle with authoring skills and gateway runtime. |
 | `conformance` | `capsule conformance <file> [--strict] [--perf] [--self-test]` | Run the 12 normative conformance vectors (C01–C12) against a capsule. |
 | `inject` | `capsule inject <file> --client-config <path> [--name <name>] [--yes]` | Safely inject MCP server configuration into client config files with shadow detection. |
