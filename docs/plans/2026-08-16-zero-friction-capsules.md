@@ -154,7 +154,16 @@ Attempt ledger:
 - P2-5 attempt 1: initial build-manager-mcpb implementation -> FAIL (inaccurate guest ABI in tool descriptions, empty -o path validation, EOF blank line in paths.ts, missing test coverage for description contents)
 - P2-5 attempt 2: guest ABI descriptions, empty -o validation, paths.ts newline -> FAIL (inaccurate allowed_hosts wildcard semantics in description, missing display_name in manifest)
 - P2-5 attempt 3: state allowed_hosts semantics from policy.matchesPattern (exact host, or `*.` covering subdomains but not the apex, unmatched hosts and IP/loopback blocked) and add display_name "Capsule Manager" to the manager manifest, with tests pinning both -> FAIL (log.write omitted from effects enumeration and effects requirement not explained for capsule.log/kv)
-- P2-5 attempt 4: document per-tool effects requirement for capsule.log (log.write), kv, sql, net in tool schemas, add log.write to effects description for create and update, add test executing multi-api authored capsule -> pending verification
+- P2-5 attempt 4: document per-tool effects requirement for capsule.log (log.write), kv, sql, net in tool schemas, add log.write to effects description for create and update, add test executing multi-api authored capsule -> FAIL (name charset [a-z0-9][a-z0-9_-]{0,63} and trust state enumerations in descriptions, McpbEntry alias duplication)
+- P2-5 attempt 5: exact name charset rule, accurate trust state list in capsule_list, delete duplicate McpbEntry alias, comprehensive description assertions -> FAIL (drift-accepted listed as listing state when verifyInstalled emits only pinned, ok, corrupt, unverifiable)
+- P2-5 attempt 6: narrow LISTED_TRUST_STATES to 4 reachable listing states (pinned, ok, corrupt, unverifiable), update capsule_list description, add tests demonstrating reachability of all 4 states -> FAIL (capsule_list description claiming re-verification on every listing instead of startup/registry-invalidation caching)
+- P2-5 attempt 7: accurately describe verification caching at startup/registry change in capsule_list description -> FAIL (cached description stated unqualified rule overlooking that failed verifications are re-checked every listing)
+- P2-5 attempt 8: accurately describe asymmetric verification lifecycle (successful verifications cached for session, failed verifications re-checked on every listing), update comments and tests -> PASS (P2-5 verified)
+
+
+
+
+
 
 
 **Verification Record (P2-5):**
@@ -202,6 +211,14 @@ Attempt ledger:
 - Acceptance (manual, this machine): install `capsule-manager.mcpb`, then in chat: "install the capsule in my downloads" → works; "make me a capsule that keeps a reading list and lets me add and list books" → agent calls `capsule_create` → `readinglist__add` / `readinglist__list` usable in the same conversation, no restart.
 
 ### P3 — Everyone else (non-Claude clients) + the file itself
+Status: completed
+Failed verify cycles: 0
+Attempt ledger:
+- attempt 1: implement capsule share with deep links and json output, update ui server with standalone installer discovery page, rewrite README with 3 core journeys and developer CLI table, create docs/DISTRIBUTION.md, add comprehensive tests -> PASS
+
+**Verification Record (P3):**
+- Automated acceptance: PASS (tests in `tests/share.test.ts` verify deeplinks, mcpServers config, .mcpb discovery, and --json output; tests in `tests/ui-server.test.ts` verify installer discovery page for capsules without UI and at `/installer`, CSP headers, and token authentication).
+- Manual acceptance: NOT PERFORMED (unattended CLI session; manual verification flagged for human owner).
 
 **P3-1. Deep links & snippets: `capsule share <file>`.**
 - Prints (and returns as JSON with `--json`): the Cursor deeplink, the VS Code `vscode:mcp/install` link, the exact `mcpServers` JSON block, the `npx agent-capsule mcp <abs path>` one-liner, and the `.mcpb` path if present. This is the "copy one thing into your other agent" story; the *sender* runs it (or their agent does).

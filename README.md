@@ -1,16 +1,104 @@
 # Agent Capsule
 
 **Agent Capsule** is a single-file, signed, capability-sandboxed package standard and runtime for AI agent tools and interactive applications.  
-A capsule packages guest JavaScript/Wasm code, declarative capability manifests, and interactive web UIs into an immutable, content-addressed container.  
+A capsule packages guest JavaScript/Wasm code, declarative capability manifests, and interactive web UIs into an immutable, content-addressed container (`.capsule`).  
 Every non-deterministic operation (time, randomness, SQL, KV, network) is mediated through explicit effect ports and recorded in a hash-chained journal for byte-identical replay.  
-Any 2026 AI agent connects to a capsule as a stateless Model Context Protocol (MCP `2026-07-28`) server over stdio — and `initialize` negotiates down to `2025-06-18`/`2025-03-26`/`2024-11-05` so current desktop clients connect too — while any human can launch its embedded UI with a single command.  
-Zero ambient authority, automated prompt-injection screening, and cryptographic TOFU key pinning protect both the host machine and the recipient agent's context.
+Capsules run seamlessly in **Claude Desktop** (via double-clickable `.mcpb` bundles or the Capsule Manager gateway), **Cursor**, **VS Code**, **Claude Code**, and **Windsurf** with zero ambient authority, automated prompt-injection screening, and cryptographic TOFU key pinning.
 
 ---
 
-## Architecture
+## User Journeys
 
+### 1. Running a Capsule in Claude Desktop (1-Click Install)
+
+Recipients do not need Node.js installed, terminal access, or manual JSON editing:
+
+1. Double-click any `.mcpb` bundle (e.g. `greeter-1.0.0.mcpb`).
+2. Claude Desktop presents the extension installation dialog.
+3. Click **Install** — the capsule's tools appear immediately in chat.
+
+Extensions execute in Claude Desktop's built-in Node.js runtime (`>= 22.13.0`). State and journals automatically persist under `~/.agent-capsule/state/` across updates and re-installations.
+
+To create an `.mcpb` bundle from any `.capsule`:
+```bash
+capsule export-mcpb my-app.capsule -o my-app.mcpb
 ```
+
+---
+
+### 2. Authoring Capsules in Chat via Capsule Manager
+
+With the **Capsule Manager** extension installed, your AI agent creates, tests, signs, and shares capsules directly in conversation without opening a terminal:
+
+1. Build the manager bundle (or install the official `capsule-manager.mcpb`):
+   ```bash
+   capsule build-manager-mcpb -o capsule-manager.mcpb
+   ```
+2. Double-click `capsule-manager.mcpb` to install it into Claude Desktop.
+3. Ask your agent in chat:
+   > *"Build me a capsule that tracks my reading list with SQLite and lets me add, search, and rate books."*
+4. The agent writes the guest JavaScript, defines the schemas, and calls `capsule_create`.
+5. The Manager verifies the capsule, signs it with your cryptographic key, runs the 12-vector conformance suite, installs it into your local registry, and dynamically registers the tools (e.g. `readinglist__add`, `readinglist__search`) without restarting Claude Desktop.
+6. The agent hands back a shareable `.mcpb` and `.capsule` path ready to send to colleagues.
+
+---
+
+### 3. Using Capsules in Cursor, VS Code, Claude Code, and Windsurf
+
+To share or install a capsule across non-Claude clients, use `capsule share`:
+
+```bash
+capsule share my-app.capsule
+```
+
+Output provides ready-to-use links and configurations:
+
+- **Cursor:** Click or copy the generated deep link (`cursor://anysphere.cursor-deeplink/mcp/install?...`).
+- **VS Code:** Click or copy the generated deep link (`vscode:mcp/install?...`).
+- **Claude Code / Terminal:** Run `npx -y agent-capsule mcp "/path/to/my-app.capsule" --state-home`.
+- **Windsurf / Generic MCP:** Add the standard `mcpServers` JSON block:
+  ```json
+  {
+    "mcpServers": {
+      "my-app": {
+        "command": "npx",
+        "args": ["-y", "agent-capsule", "mcp", "/path/to/my-app.capsule", "--state-home"]
+      }
+    }
+  }
+  ```
+
+#### Standalone Discovery & Installer Page
+Double-clicking a bare `.capsule` file (or running `capsule ui <file.capsule>` on a capsule without an embedded UI) opens a local, authenticated discovery page displaying publisher cryptographic identity, TOFU trust status, declared capabilities, tool list, and 1-click install snippets.
+
+---
+
+## Developer CLI Reference
+
+The CLI is available as `capsule` or `agent-capsule` (via `npm install -g agent-capsule` or `npx agent-capsule`):
+
+| Command | Usage | Description |
+| :--- | :--- | :--- |
+| `pack` | `capsule pack <dir> [-o out.capsule]` | Pack a project directory into a deterministic, signed `.capsule` archive. |
+| `verify` | `capsule verify <file> [--json] [--allow-suspicious] [--accept-drift]` | Verify container integrity, in-toto statement, Ed25519 signatures, and trust state. |
+| `run` | `capsule run <file> --tool <name> [--args '<json>'] [--trace]` | Invoke a tool directly in the QuickJS sandbox and record execution in journal. |
+| `replay` | `capsule replay <file> [--run <runId>] [--json]` | Replay a recorded run deterministically from the journal and verify zero divergence. |
+| `mcp` | `capsule mcp <file> [--state-home] [--accept-drift] [--allow-suspicious]` | Start stateless MCP JSON-RPC server over stdio (negotiates `2026-07-28` to `2024-11-05`). |
+| `ui` | `capsule ui <file> [--port <n>] [--timeout <min>] [--no-open]` | Start authenticated loopback HTTP server and open embedded UI or installer page. |
+| `share` | `capsule share <file> [--json] [--accept-drift]` | Generate multi-client sharing payloads, Cursor/VS Code deep links, and config snippets. |
+| `export-mcpb` | `capsule export-mcpb <file> [-o out.mcpb]` | Export a self-contained 1-click install `.mcpb` extension bundle for Claude Desktop. |
+| `manager` | `capsule manager [--accept-drift] [--allow-suspicious]` | Run the stdio Capsule Manager gateway server multiplexing all installed capsules. |
+| `build-manager-mcpb` | `capsule build-manager-mcpb [-o out.mcpb]` | Build the official Capsule Manager `.mcpb` bundle with authoring skills and gateway runtime. |
+| `conformance` | `capsule conformance <file> [--strict] [--perf] [--self-test]` | Run the 12 normative conformance vectors (C01–C12) against a capsule. |
+| `inject` | `capsule inject <file> --client-config <path> [--name <name>] [--yes]` | Safely inject MCP server configuration into client config files with shadow detection. |
+| `export-plugin` | `capsule export-plugin <file> -o <dir>` | Export Agent Plugins 1.0.0 layout (`plugin.json`, `mcp.json`, `SKILL.md`). |
+| `install-handler` | `capsule install-handler [--uninstall] [--yes]` | Register OS shell file associations for `.capsule` double-click launching. |
+
+---
+
+## Architecture & Security Posture
+
+```text
                  .capsule file  =  ZIP archive (immutable, signed, content-addressed)
                  ├── capsule.json                Manifest: metadata, runtime, capabilities, tools, UI
                  ├── src/main.js                 Guest code (QuickJS-in-Wasm, zero ambient authority)
@@ -19,17 +107,18 @@ Zero ambient authority, automated prompt-injection screening, and cryptographic 
                      ├── statement.json          in-toto attestation: {subject, files[], predicate}
                      └── signature.json          Ed25519 signature over RFC-8785(statement)
 
-HOST RUNTIME (Node.js 24+)                             MUTABLE SIDECARS (never signed)
+HOST RUNTIME (Node.js 22+)                             MUTABLE SIDECARS (never signed)
 ┌─────────────────────────────────────────────────┐    ├── <name>.app.sqlite      guest SQL & KV state
-│ CLI ──┬── mcp/         stdio JSON-RPC (2026-07) │    └── <name>.journal.sqlite  hash-chained journal
+│ CLI ──┬── mcp/         stdio JSON-RPC           │    └── <name>.journal.sqlite  hash-chained journal
+│       ├── manager/     dynamic gateway & skills │
 │       ├── ui/          loopback HTTP + token    │
 │       ├── conformance/ 12 normative vectors     │
-│       └── commands/    Agent Plugins & inject   │
+│       └── share/       deep links & installers  │
 │                                                 │
 │  invoke.ts ──► validate args against Ajv 2020   │
 │            ──► journal tool.proposed            │
 │            ──► policy check (declared ∩ grants) │
-│            ──► MRTR consent before guest runs   │
+│            ──► native elicitation / MRTR consent│
 │                                                 │
 │  guest.ts  ──► QuickJS-in-Wasm runtime          │
 │            ──► memory ceiling & CPU deadlines   │
@@ -43,134 +132,17 @@ HOST RUNTIME (Node.js 24+)                             MUTABLE SIDECARS (never s
 └─────────────────────────────────────────────────┘
 ```
 
----
+### Security Invariants
+1. **Zero Ambient Authority:** Guest code runs in a WebAssembly sandbox isolated from host filesystem, environment variables, and network sockets.
+2. **Deterministic Replay:** Non-deterministic inputs (time, entropy, database reads, network fetch) are journalled to hash-chained SQLite databases. Runs replay byte-for-byte identically.
+3. **Cryptographic TOFU:** Public keys and tool catalog digests are pinned on first use (`~/.agent-capsule/trust.json`). Key rotations and catalog drifts require explicit confirmation.
+4. **Prompt Injection Screening:** Tool descriptions and schemas are screened for adversarial instructions (`ignore_previous`, `system_prompt`, `conceal`) and unicode homoglyph confusable attacks.
+5. **Interactive Consent (MRTR & Elicitation):** Declared network capabilities require interactive consent on first call (`always-allow`, `allow-once`, `deny`).
 
-## Security Posture
-
-Agent Capsule treats the capsule as untrusted, the network as adversarial, and the recipient AI agent as a target. Guest logic runs inside a WebAssembly sandbox with zero access to host files, environment variables, or ambient sockets. Egress network traffic is gated by strict domain allowlists, private/loopback IP screening, and interactive user consent (MRTR). Manifests and parameter schemas are screened for prompt injection markers, hidden instructions, and confusable homoglyphs before reaching an agent. Cryptographic Ed25519 signatures and Trust-on-First-Use (TOFU) key/catalog pinning prevent supply chain tampering and silent capability expansions (rug pulls).
-
----
-
-## Quickstart
-
-### Prerequisites
-
-- Node.js **>= 24.0.0** (uses built-in TypeScript execution and SQLite)
-
-### Pack and Verify a Capsule
-
-```bash
-# Pack a project directory into a signed capsule
-node src/cli.ts pack tests/fixtures/hello -o hello.capsule
-
-# Verify cryptographic signature, container digests, and TOFU key pinning
-node src/cli.ts verify hello.capsule
-```
-
-### Run and Replay Tools
-
-```bash
-# Execute a tool directly from the CLI (set CAPSULE_JOURNAL_ARGS=1 so arguments are recorded for replay)
-CAPSULE_JOURNAL_ARGS=1 node src/cli.ts run hello.capsule --tool greet --args '{"name":"Ada"}'
-
-# Replay the execution deterministically from the journal
-node src/cli.ts replay hello.capsule
-```
-
-### Launch MCP Server & Web UI
-
-```bash
-# Run as an MCP 2026-07-28 stdio server for an AI agent
-node src/cli.ts mcp hello.capsule
-
-# Open the embedded MCP App UI in a browser
-node src/cli.ts ui hello.capsule
-```
-
-### Run Conformance Suite
-
-```bash
-# Run the 12 normative conformance checks (C01–C12)
-node src/cli.ts conformance hello.capsule --strict --perf
-```
-
----
-
-## CLI Reference
-
-The CLI is available as `capsule` or `agent-capsule`:
-
-| Command | Usage | Description |
-| :--- | :--- | :--- |
-| `pack` | `capsule pack <dir> [-o out.capsule]` | Pack a directory into a deterministic, signed `.capsule` archive. |
-| `verify` | `capsule verify <file> [--json] [--allow-suspicious] [--accept-drift]` | Verify container integrity, Ed25519 signatures, and trust state. |
-| `run` | `capsule run <file> --tool <name> [--args '<json>'] [--trace]` | Invoke a tool directly in the sandbox and record execution in journal (`CAPSULE_JOURNAL_ARGS=1` records args for replay). |
-| `replay` | `capsule replay <file> [--run <runId>] [--json]` | Replay a recorded run deterministically and verify zero divergence. |
-| `mcp` | `capsule mcp <file> [--accept-drift] [--allow-suspicious]` | Start stateless MCP `2026-07-28` JSON-RPC server over stdio. |
-| `ui` | `capsule ui <file> [--port <n>] [--timeout <min>] [--no-open]` | Start authenticated loopback HTTP server and open embedded UI in browser. |
-| `conformance` | `capsule conformance <file> [--strict] [--perf] [--self-test]` | Run the 12 normative conformance vectors against a capsule. |
-| `inject` | `capsule inject <file> --client-config <path> [--name <name>] [--yes]` | Safely inject MCP server configuration into an AI agent client config. Prints without writing unless `--yes` is given; warns when a Microsoft Store Claude Desktop shadows the target file. |
-| `export-plugin` | `capsule export-plugin <file> -o <dir>` | Export Agent Plugins 1.0.0 layout (`plugin.json`, `mcp.json`, `SKILL.md`). |
-| `install-handler` | `capsule install-handler [--uninstall] [--yes]` | Register Windows shell file associations for `.capsule` double-click. |
-
----
-
-## Client Configuration Guide
-
-To connect an Agent Capsule to your AI editor or desktop assistant, use `capsule inject` or add the stdio configuration manually.
-
-### Automatic Injection
-
-Without `--yes`, `inject` only prints the merged config to stdout and says so on stderr; nothing is written.
-
-```bash
-# Claude Desktop (macOS)
-capsule inject my-app.capsule --client-config ~/Library/Application\ Support/Claude/claude_desktop_config.json --yes
-
-# Claude Desktop (Windows, PowerShell)
-capsule inject my-app.capsule --client-config "$env:APPDATA\Claude\claude_desktop_config.json" --yes
-
-# Claude Desktop (Windows, cmd.exe)
-capsule inject my-app.capsule --client-config "%APPDATA%\Claude\claude_desktop_config.json" --yes
-
-# Cursor (macOS)
-capsule inject my-app.capsule --client-config ~/Library/Application\ Support/Cursor/User/globalStorage/cursor.mcp/mcp.json --yes
-
-# Windsurf (Windows, PowerShell)
-capsule inject my-app.capsule --client-config "$env:USERPROFILE\.codeium\windsurf\mcp_config.json" --yes
-```
-
-### Claude Desktop from the Microsoft Store (Windows)
-
-The Microsoft Store build of Claude Desktop runs in an MSIX container with AppData virtualization: it reads and writes its **own copy** of `claude_desktop_config.json` under
-
-```text
-%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json
-```
-
-Once that copy exists it permanently shadows the classic `%APPDATA%\Claude\...` path for the app, so edits to the classic file are never seen. `capsule inject` detects this case and prints the effective path — point `--client-config` at the `LocalCache` copy, or use Claude Desktop's own **Settings → Developer → Edit Config**, which opens the right file.
-
-### Manual Configuration Example
-
-Add to your client's `mcpServers` block:
-
-```json
-{
-  "mcpServers": {
-    "my-app": {
-      "type": "stdio",
-      "command": "agent-capsule",
-      "args": ["mcp", "/absolute/path/to/my-app.capsule"]
-    }
-  }
-}
-```
-
-The `agent-capsule` command must be on the client's `PATH` (run `npm link` in this repository to install the shims).
-
-### MCP Protocol Compatibility
-
-The capsule server speaks MCP `2026-07-28` natively and negotiates `initialize` down to `2025-06-18`, `2025-03-26`, or `2024-11-05` when the client requests one of those (Claude Desktop 1.x requests `2025-06-18`). On a negotiated legacy session everything works except the MRTR consent flow, which those revisions cannot carry: a tool that still needs a user grant (`net:*`, `pack`) answers with an `E_CONSENT` error naming the missing grants — grant them once via the capsule UI (`capsule ui my-app.capsule`) or any `2026-07-28` client, then call the tool again. `server/discover` lists every negotiable revision in `supportedVersions`.
+For detailed specifications, see:
+- [Distribution Architecture Guide](docs/DISTRIBUTION.md)
+- [Formal Specification (SPEC.md)](docs/SPEC.md)
+- [Threat Model (THREAT-MODEL.md)](docs/THREAT-MODEL.md)
 
 ---
 
@@ -190,21 +162,18 @@ CAPSULE_TRACE_DIR=./traces capsule run my-app.capsule --tool score_lead
 
 ## Verification & Testing
 
-Agent Capsule includes an exhaustive automated test harness covering container cryptography, sandboxing invariants, determinism, MCP protocols, and interop:
+Run the full automated test suite and conformance harness:
 
 ```bash
-# Run all unit and integration tests
+# Run all unit and integration tests (400+ tests)
 npm test
 
 # Run TypeScript typechecker
 npm run typecheck
+
+# Run linter
+npm run lint
+
+# Build standalone distribution bundle
+npm run build
 ```
-
----
-
-## Documentation Links
-
-- **Normative Specification:** [`docs/SPEC.md`](docs/SPEC.md) — Container rules, schemas, ABI, effects, and conformance vectors.
-- **Threat Model & Security Architecture:** [`docs/SECURITY.md`](docs/SECURITY.md) — Threat analysis, defense matrix, and disclosure policy.
-- **Project Roadmap:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — Shipped features and v0.2/v0.3 milestones.
-- **Historical Proposal:** [`docs/agent-capsule-proposal.md`](docs/agent-capsule-proposal.md) — Visionary background input.
