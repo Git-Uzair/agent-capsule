@@ -35,22 +35,22 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
     name: "capsule_create",
     title: "Create Capsule",
     description:
-      "Create, test, conform, sign, and install a new Agent Capsule from guest JavaScript source code.",
+      "Create, test, conform, sign, and install a brand-new Agent Capsule from guest JavaScript source code in conversation. Scaffolds the workspace, packages and signs with local key, runs automated conformance tests, installs into the gateway so tools are immediately callable under '<name>__<toolName>', and produces a double-clickable .mcpb sharing bundle.",
     inputSchema: {
       type: "object",
       required: ["name", "source", "tools"],
       properties: {
         name: {
           type: "string",
-          description: "Name of the capsule ([a-zA-Z0-9_-], 1-64 characters).",
+          description: "Name of the capsule ([a-zA-Z0-9_-], 1-64 characters). All exposed tools will be prefixed with '<name>__'.",
         },
         title: {
           type: "string",
-          description: "Human-readable title (1-80 characters).",
+          description: "Human-readable display title (1-80 characters).",
         },
         description: {
           type: "string",
-          description: "Short description of the capsule (1-500 characters).",
+          description: "Summary of the capsule's purpose and capabilities (1-500 characters).",
         },
         version: {
           type: "string",
@@ -58,39 +58,40 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         source: {
           type: "string",
-          description: "Guest JavaScript source code defining globalThis.tools.",
+          description:
+            "Guest JavaScript source code (ESM/CJS). Must define handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Can use guest runtime APIs like `capsule.kv`, `capsule.sql`, and `fetch` if declared in capabilities.",
         },
         tools: {
           type: "array",
-          description: "Array of tool definitions provided by the guest code.",
+          description: "Array of tool definitions exposed to the LLM agent.",
           items: {
             type: "object",
             required: ["name"],
             properties: {
               name: {
                 type: "string",
-                description: "Tool name ([a-zA-Z0-9_-], 1-64 characters).",
+                description: "Tool name ([a-zA-Z0-9_-], 1-64 characters). Exposed as '<capsuleName>__<toolName>'.",
               },
               title: {
                 type: "string",
-                description: "Tool title (1-80 characters).",
+                description: "Human-readable tool title (1-80 characters).",
               },
               description: {
                 type: "string",
-                description: "Tool description (1-1024 characters).",
+                description: "Clear operating instructions for the tool (1-1024 characters).",
               },
               inputSchema: {
                 type: "object",
-                description: "JSON Schema for tool arguments.",
+                description: "JSON Schema object for tool arguments.",
               },
               outputSchema: {
                 type: "object",
-                description: "Optional JSON Schema for tool return value.",
+                description: "Optional JSON Schema object for tool return value.",
               },
               effects: {
                 type: "array",
                 items: { type: "string" },
-                description: "Declared effects (e.g. kv.get, kv.set, sql.query, sql.exec, net.fetch).",
+                description: "Declared effect identifiers (e.g. kv.get, kv.set, sql.query, sql.exec, net.fetch).",
               },
             },
           },
@@ -101,11 +102,11 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
           properties: {
             kv: {
               type: "boolean",
-              description: "Enable key-value storage capability.",
+              description: "Enable persistent key-value storage (`capsule.kv.get/set/delete/list`).",
             },
             sql: {
               type: "boolean",
-              description: "Enable SQLite storage capability.",
+              description: "Enable persistent SQLite storage (`capsule.sql.query/exec`).",
             },
             net: {
               type: "object",
@@ -114,7 +115,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
                 allowed_hosts: {
                   type: "array",
                   items: { type: "string" },
-                  description: "Explicit list of allowed domain names for network fetch.",
+                  description: "Explicit list of allowed domain names for network fetch (wildcards must be exact domain strings; unlisted domains are blocked).",
                 },
               },
             },
@@ -142,7 +143,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
     name: "capsule_update",
     title: "Update Capsule",
     description:
-      "Update an existing Agent Capsule's source code or tools, bump version, re-sign, test conformance, and update installation.",
+      "Update an existing Agent Capsule's guest JavaScript source code, tool definitions, capabilities, or metadata. Re-signs with local key, runs conformance tests, updates installation, and refreshes the .mcpb bundle.",
     inputSchema: {
       type: "object",
       properties: {
@@ -222,7 +223,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
     name: "capsule_test_tool",
     title: "Test Capsule Tool",
     description:
-      "Run one sandboxed invocation of a tool in an installed capsule and answer exactly as a real call to that tool would — same output, same run id and journaled effect count — so a capsule can be checked before telling the user it works.",
+      "Run one sandboxed test invocation of a tool in an installed capsule and return the exact output, run ID, and journaled effect count that a real call through the gateway produces, enabling verification before presenting to the user.",
     inputSchema: {
       type: "object",
       required: ["tool"],
@@ -237,7 +238,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         tool: {
           type: "string",
-          description: "Name of the tool to invoke.",
+          description: "Bare name of the tool to invoke (without '<capsuleName>__' prefix).",
         },
         args: {
           type: "object",
@@ -254,18 +255,18 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
     name: "capsule_install",
     title: "Install Capsule",
     description:
-      "Install an Agent Capsule from a local file path or automatically from the Downloads folder.",
+      "Install an Agent Capsule from a local file path (.capsule) or automatically from the Downloads folder. Performs full signature verification and TOFU pinning. Once installed, its tools are immediately exposed under '<capsuleName>__<toolName>' without restarting the agent.",
     inputSchema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "Absolute or relative file path to the .capsule file to install.",
+          description: "Absolute or relative file path to the .capsule file to install. Use when the user specifies a path.",
         },
         from_downloads: {
           type: "boolean",
           description:
-            "Scan the user's Downloads folder for .capsule files. If exactly 1 is found, install it; if multiple, list candidates.",
+            "Scan the user's Downloads folder for .capsule files. If exactly 1 candidate is found, install it; if multiple, list candidates.",
         },
         accept_drift: {
           type: "boolean",
@@ -284,17 +285,17 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_uninstall",
     title: "Uninstall Capsule",
-    description: "Uninstall an installed Agent Capsule by capsuleId or name.",
+    description: "Uninstall an installed Agent Capsule by capsuleId or name. Immediately removes its tools from the gateway.",
     inputSchema: {
       type: "object",
       properties: {
         capsuleId: {
           type: "string",
-          description: "Payload digest ID of the capsule to uninstall.",
+          description: "Payload digest ID (SHA-256) of the capsule to uninstall.",
         },
         name: {
           type: "string",
-          description: "Name of the capsule to uninstall.",
+          description: "Name of the capsule to uninstall (uninstalls all instances with this name).",
         },
       },
     },
@@ -303,7 +304,7 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_list",
     title: "List Installed Capsules",
-    description: "List all installed Agent Capsules, their publisher keys, trust state, and exposed tools.",
+    description: "List all installed Agent Capsules, their publisher keys, trust state (pinned, ok, drift, corrupt), declared capabilities, and exposed gateway tools ('<capsuleName>__<toolName>').",
     inputSchema: {
       type: "object",
       properties: {},

@@ -133,7 +133,7 @@ Attempt ledger:
 - TOFU pinning happens on that first load, exactly as with CLI usage. Document in `docs/SPEC.md` §7 (one paragraph: "MCPB delivery does not bypass verification").
 
 ### P2 — The Capsule Manager extension (the platform)
-Status: in_progress
+Status: completed
 Failed verify cycles: 5 (on P2-4)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
@@ -150,7 +150,9 @@ Attempt ledger:
 - P2-4 attempt 3: screenManifest pre-pack before loadCapsule to prevent pin poisoning, explicit accept_drift in authoring, callCapsuleTool shared dispatch for capsule_test_tool returning gateway envelope, delete parseManifest duplicate checks -> FAIL (mismatched capsuleId and name in capsule_update silently mixing versions)
 - P2-4 attempt 4: validate capsuleId and name agreement in capsule_update with InvalidParams, isolate version bump to matching entry -> FAIL (capsule_test_tool silently ignored name when capsuleId and name mismatched)
 - P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> FAIL (DUPLICATION unused duplicate ManagerPipelineOptions type declaration)
-- P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> pending verification
+- P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> PASS (P2-4 verified)
+- P2-5 attempt 1: implement build-manager-mcpb command, path helpers, operating manual descriptions, and tests in tests/manager-mcpb.test.ts -> PASS (P2-5 verified)
+
 
 
 **P2-1. Manager server core.**

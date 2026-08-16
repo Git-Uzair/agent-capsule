@@ -1,10 +1,12 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { CapsuleError } from "../core/errors.ts";
-import { getDefaultCliPath } from "../core/paths.ts";
+import { getDefaultIconPath, getDistRuntimePaths } from "../core/paths.ts";
 import { loadCapsule } from "../format/capsule.ts";
 import { packDeterministicZip, type ZipEntry } from "../format/container.ts";
 import { sanitizeModelText } from "../security/text.ts";
+
+export { getDefaultIconPath, getDistRuntimePaths };
 
 const USAGE = "usage: capsule export-mcpb <file> [-o <out.mcpb>]";
 
@@ -13,40 +15,6 @@ function usage(message: string): never {
 }
 
 export type McpbEntry = ZipEntry;
-
-export function getDistRuntimePaths(customDistDir?: string): { cliJs: string; wasm: string } {
-  // The runtime bundle is wherever the CLI entry lives; scripts/build.js copies the
-  // Wasm asset beside it, so one existing lookup locates both files.
-  const distDir = customDistDir ?? dirname(getDefaultCliPath());
-  const cliJs = resolve(distDir, "cli.js");
-  const wasm = resolve(distDir, "emscripten-module.wasm");
-  if (existsSync(cliJs) && existsSync(wasm)) {
-    return { cliJs, wasm };
-  }
-  throw new CapsuleError(
-    "E_CONTAINER",
-    customDistDir
-      ? `dist runtime bundle not found in ${customDistDir}`
-      : "dist runtime bundle not found (run npm run build first)",
-  );
-}
-
-export function getDefaultIconPath(customIconPath?: string): string {
-  if (customIconPath) {
-    if (existsSync(customIconPath)) return customIconPath;
-    throw new CapsuleError("E_CONTAINER", `icon file not found at ${customIconPath}`);
-  }
-
-  // scripts/build.js copies assets/icon.png beside the CLI bundle; running from
-  // source (no build yet) falls back to the repository asset.
-  const besideCli = resolve(dirname(getDefaultCliPath()), "icon.png");
-  if (existsSync(besideCli)) return besideCli;
-
-  const repoAsset = resolve(import.meta.dirname, "..", "..", "assets", "icon.png");
-  if (existsSync(repoAsset)) return repoAsset;
-
-  throw new CapsuleError("E_CONTAINER", "default icon.png not found");
-}
 
 export async function packMcpb(entries: McpbEntry[]): Promise<Buffer> {
   return packDeterministicZip(entries, { compress: true });
