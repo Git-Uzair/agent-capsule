@@ -38,12 +38,13 @@ import {
   handleCapsuleCreate,
   handleCapsuleUpdate,
 } from "./authoring.ts";
-import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
+import { loadInstalledStore, loadSeededStore, markSeeded, type InstalledEntry } from "./registry.ts";
 import {
   GATEWAY_NAME_PATTERN,
   handleCapsuleInstall,
   handleCapsuleList,
   handleCapsuleUninstall,
+  installLoadedCapsule,
   listedTrust,
   MANAGER_TOOLS,
   type ListedCapsule,
@@ -93,6 +94,8 @@ export type ManagerMcpServer = McpServer & {
   notifyListChanged(): void;
   invalidateCache(): void;
   drain(): Promise<void>;
+  /** Deliver a bundled capsule into this home's registry, once per capsule identity. */
+  seed(path: string): Promise<void>;
 };
 
 export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcpServer {
@@ -614,6 +617,36 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     invalidateCache,
     drain(): Promise<void> {
       return messageQueue;
+    },
+    /**
+     * The seeded-bundle boot road: a `.mcpb` built with `export-mcpb --manager` carries one capsule
+     * and offers it here on every start. The seed runs the same pipeline as `capsule_install` —
+     * verify, TOFU pin, injection screen, register — and then writes the capsuleId to the seeded
+     * store, so the next boot of the same bundle offers nothing: absence from the registry after
+     * that is the user's uninstall, and a seed must not overrule it. Every refusal is a warning,
+     * never a crash — a bundle whose payload cannot be served must still bring up the manager it
+     * carries, or a hostile payload could brick the recipient's platform.
+     */
+    async seed(path: string): Promise<void> {
+      try {
+        const loaded = await loadCapsule(path, { trust: true, homeDir: opts.homeDir });
+        if (loadSeededStore(opts.homeDir)[loaded.capsuleId] !== undefined) {
+          return;
+        }
+        const res = await installLoadedCapsule(
+          loaded,
+          { homeDir: opts.homeDir, warn, notifyListChanged, invalidateCache, servedTools },
+          { actionWord: "Installed", targetFile: path },
+        );
+        if (res.isError) {
+          warn(`Seed capsule not installed: ${res.text}`);
+          return;
+        }
+        markSeeded(loaded.capsuleId, opts.homeDir);
+      } catch (err) {
+        const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
+        warn(`Seed capsule not installed (${path}): ${detail}`);
+      }
     },
     serve(transport: Transport): void {
       activeTransports.add(transport);

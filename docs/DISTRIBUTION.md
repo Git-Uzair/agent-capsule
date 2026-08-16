@@ -12,6 +12,7 @@ Agent Capsules support two primary distribution vehicles depending on target cli
    - A single ZIP archive containing the signed capsule, compiled runtime, QuickJS Wasm engine, icon, and extension manifest (`manifest_version: 0.2`).
    - Created via `capsule export-mcpb <file.capsule>`.
    - Recipients double-click the `.mcpb` file to install it directly into Claude Desktop with zero terminal commands, zero configuration editing, and no requirement for an external Node.js installation.
+   - **Manager-seeded variant** (`capsule export-mcpb <file.capsule> --manager`, and the default output of in-chat `capsule_create`/`capsule_update`): the same payload, but the bundle runs `manager --seed <payload>` instead of a dedicated single-capsule server. The recipient gets the capsule *and* the full Capsule Manager, making sharing self-propagating — see §2a.
 
 2. **Capsule Manager Platform Gateway** (Claude Desktop In-Chat Creation & Management):
    - An MCP server extension (`capsule-manager.mcpb`) that acts as a local gateway for installing, creating, updating, and executing capsules inside conversation.
@@ -72,6 +73,23 @@ my-capsule.mcpb
 - `args`: Paths to `server/cli.js` and `payload/<name>.capsule` use `${__dirname}` templating resolved by Claude Desktop.
 - `--state-home`: Directs the runtime to store state under `~/.agent-capsule/state/` rather than the extension directory (see Section 4).
 - `payload`: The embedded `.capsule` file is packaged byte-identically so its statement digest and Ed25519 signature verify on load.
+
+---
+
+## 2a. Manager-Seeded Bundles (Self-Propagating Sharing)
+
+A bundle built with `--manager` carries the same `payload/<name>-<version>.capsule` but its manifest launches the gateway instead of a dedicated server:
+
+```json
+"args": ["${__dirname}/server/cli.js", "manager", "--seed", "${__dirname}/payload/notepad-0.1.2.capsule"]
+```
+
+Invariants:
+
+- **Stable extension identity.** The manifest `name` is always `capsule-manager` (version = host version, author = Agent Capsule). Clients derive the extension id from `name`, so installing any seeded bundle *replaces* the manager extension rather than standing up a second gateway over the same registry. The platform is fungible; the library under `~/.agent-capsule/` accumulates.
+- **Seed-once semantics.** On boot, `--seed` runs the exact `capsule_install` pipeline (container verification, Ed25519 signature, TOFU pinning, prompt-injection screening, registry write) and then records the capsuleId in `~/.agent-capsule/seeded.json`. A capsuleId present there is never offered again: a user who uninstalls a seeded capsule does not find it resurrected on the next restart.
+- **The platform survives its cargo.** A seed that fails verification, screening, or trust checks emits a diagnostic on `stderr` and is skipped; the manager serves regardless. `stdout` stays 100% JSON-RPC pure.
+- **Trust is unchanged.** The recipient's first load TOFU-pins the sender's publisher key for that capsule name. A later seeded bundle whose same-named capsule is signed by a different key, or whose tool catalog drifted, is refused exactly as `capsule_install` would refuse it — seeding grants no bypass.
 
 ---
 

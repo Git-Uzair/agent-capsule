@@ -2,13 +2,15 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fromBuffer, type Entry } from "yauzl";
 import SCHEMA from "../schema/capsule-0.1.schema.json" with { type: "json" };
 import { buildManagerMcpb, runBuildManagerMcpb } from "../src/commands/build-manager-mcpb.ts";
+import { exportMcpb } from "../src/commands/export-mcpb.ts";
 import { getDefaultIconPath, getDistRuntimePaths } from "../src/core/paths.ts";
-import { installedCapsulePath } from "../src/mcp/manager/registry.ts";
+import { packDirectory } from "../src/format/capsule.ts";
+import { installedCapsulePath, loadSeededStore } from "../src/mcp/manager/registry.ts";
 import { createManagerServer } from "../src/mcp/manager/server.ts";
 import { AUTHORED_NAME_PATTERN, LISTED_TRUST_STATES, listedTrust } from "../src/mcp/manager/tools.ts";
 import type { JsonRpcRequest } from "../src/mcp/transport.ts";
@@ -208,7 +210,8 @@ describe("capsule build-manager-mcpb", () => {
       assert.equal(initRes.result["protocolVersion"], "2025-06-18");
       assert.deepEqual(initRes.result["capabilities"], {
         tools: { listChanged: true },
-        resources: { listChanged: false },
+        resources: { listChanged: true },
+        extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
       });
 
       assert.equal(listRes.id, 2);
@@ -1042,6 +1045,95 @@ describe("capsule build-manager-mcpb", () => {
           return true;
         },
       );
+    });
+  });
+});
+
+describe("manager-seeded .mcpb bundles", () => {
+  const FIXTURE = resolve(ROOT, "templates", "hello");
+
+  async function packHello(home: string): Promise<string> {
+    const dir = join(home, `src-${randomUUID()}`);
+    cpSync(FIXTURE, dir, { recursive: true });
+    const out = join(home, `hello-${randomUUID()}.capsule`);
+    await packDirectory(dir, out, { homeDir: home });
+    return out;
+  }
+
+  it("export-mcpb --manager builds a seeded bundle under the stable capsule-manager identity", async () => {
+    await withHome(async (home) => {
+      const capsulePath = await packHello(home);
+      const outPath = join(home, "hello-seeded.mcpb");
+      await exportMcpb(capsulePath, outPath, { manager: true });
+
+      const entries = await extractZip(readFileSync(outPath));
+      assert.deepEqual(
+        [...entries.keys()].sort(),
+        [
+          "icon.png",
+          "manifest.json",
+          "package.json",
+          "payload/hello-1.0.0.capsule",
+          "server/cli.js",
+          "server/emscripten-module.wasm",
+        ],
+      );
+
+      // One extension identity for every seeded bundle: installing a second seeded capsule must
+      // replace the manager extension, never stand up a second gateway over the same registry.
+      const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+      assert.equal(manifest.name, "capsule-manager");
+      assert.equal(manifest.display_name, "Capsule Manager");
+      assert.equal(manifest.version, HOST_VERSION);
+      assert.deepEqual(manifest.author, { name: "Agent Capsule" });
+      assert.ok(manifest.description.includes("'hello' capsule"));
+      assert.deepEqual(manifest.server.mcp_config, {
+        command: "node",
+        args: [
+          "${__dirname}/server/cli.js",
+          "manager",
+          "--seed",
+          "${__dirname}/payload/hello-1.0.0.capsule",
+        ],
+        env: {},
+      });
+
+      // The payload rides byte-identically, so its signature verifies on the recipient's machine.
+      assert.deepEqual(entries.get("payload/hello-1.0.0.capsule"), readFileSync(capsulePath));
+    });
+  });
+
+  it("seed installs the bundled capsule once and never resurrects an uninstalled one", async () => {
+    await withHome(async (home) => {
+      const capsulePath = await packHello(home);
+      const server = createManagerServer({ homeDir: home, warn: () => {} });
+
+      await server.seed(capsulePath);
+      const listRes = await server.handleMessage({ jsonrpc: "2.0", id: 900, method: "tools/list" });
+      assert.ok(listRes && "result" in listRes);
+      const names = (listRes.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+      assert.ok(names.includes("hello__greet"), "seeded capsule tools are served");
+      assert.ok(names.includes("capsule_create"), "authoring tools are served beside the seed");
+      assert.equal(Object.keys(loadSeededStore(home)).length, 1, "delivery is recorded");
+
+      // Booting the same bundle again offers the same capsule: exactly one install results.
+      await server.seed(capsulePath);
+      const listAgain = await server.handleMessage(toolCall("capsule_list", {}));
+      assert.ok(listAgain && "result" in listAgain);
+      const rows = (listAgain.result as { structuredContent: { capsules: unknown[] } })
+        .structuredContent.capsules;
+      assert.equal(rows.length, 1);
+
+      // The user's uninstall outranks every later boot of the bundle that delivered the capsule.
+      const removal = await server.handleMessage(toolCall("capsule_uninstall", { name: "hello" }));
+      assert.ok(removal && "result" in removal);
+      const rebooted = createManagerServer({ homeDir: home, warn: () => {} });
+      await rebooted.seed(capsulePath);
+      const afterRes = await rebooted.handleMessage({ jsonrpc: "2.0", id: 901, method: "tools/list" });
+      assert.ok(afterRes && "result" in afterRes);
+      const after = (afterRes.result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
+      assert.equal(after.includes("hello__greet"), false, "an uninstalled seed stays uninstalled");
+      assert.ok(after.includes("capsule_create"), "the manager itself still serves");
     });
   });
 });

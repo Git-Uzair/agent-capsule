@@ -594,7 +594,10 @@ export async function installLoadedCapsule(
         installedCapsulesDir(opts.homeDir),
         `${loaded.manifest.meta.name}-${loaded.manifest.meta.version}.mcpb`,
       );
-      mcpbFile = await exportMcpb(destPath, mcpbDest);
+      // Manager-seeded on purpose: the bundle an author shares from conversation carries the
+      // platform with the app, so the recipient can author and share capsules too — a bare
+      // single-app bundle remains available via `capsule export-mcpb` without `--manager`.
+      mcpbFile = await exportMcpb(destPath, mcpbDest, { manager: true });
     } catch (err) {
       opts.warn(`Warning: failed to export .mcpb bundle: ${err instanceof Error ? err.message : String(err)}`);
     }

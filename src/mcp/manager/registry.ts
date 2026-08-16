@@ -94,6 +94,39 @@ export function addInstalledCapsule(
   saveInstalledStore(store, homeDir);
 }
 
+const SEEDED_FILE = "seeded.json";
+
+export function seededPath(homeDir: string = capsuleHome()): string {
+  return join(homeDir, SEEDED_FILE);
+}
+
+/**
+ * Capsule ids a seeded bundle has already delivered, capsuleId → ISO time of that first delivery.
+ * A seeded manager bundle re-offers its payload on every boot, and "already delivered once" is the
+ * only fact that separates a first run (install it) from a capsule the user deliberately
+ * uninstalled (leave it gone) — the installed store cannot make that distinction, because absence
+ * there is exactly what both cases look like.
+ */
+export function loadSeededStore(homeDir: string = capsuleHome()): Record<string, string> {
+  const file = seededPath(homeDir);
+  return readStore(file, {
+    code: "E_USAGE",
+    label: "seeded store",
+    entry: (value, key) => {
+      if (typeof value !== "string") {
+        throw new CapsuleError("E_USAGE", `seeded store entry is malformed: ${key}`, { file, key });
+      }
+      return value;
+    },
+  });
+}
+
+export function markSeeded(capsuleId: string, homeDir: string = capsuleHome()): void {
+  const seeded = loadSeededStore(homeDir);
+  seeded[capsuleId] = new Date().toISOString();
+  writeStore(seededPath(homeDir), { version: 1, capsules: seeded });
+}
+
 export function removeInstalledCapsule(
   capsuleId: string,
   homeDir: string = capsuleHome(),
