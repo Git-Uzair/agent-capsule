@@ -8,7 +8,7 @@ import { createInterface } from "node:readline";
 import { packDirectory } from "../src/format/capsule.ts";
 import { createManagerServer, ELICITATION_TIMEOUT_MS } from "../src/mcp/manager/server.ts";
 import { DECISION, DECISION_PROPERTY, ELICITATION_METHOD } from "../src/mcp/mrtr.ts";
-import { MCP_PROTOCOL_VERSION } from "../src/mcp/server.ts";
+import { MCP_PROTOCOL_VERSION, SERVER_INFO_META } from "../src/mcp/server.ts";
 import {
   type JsonRpcId,
   type JsonRpcMessage,
@@ -547,14 +547,22 @@ test("Manager elicitation: accept response without valid decision returns readab
         resultType?: string;
         isError: boolean;
         content: Array<{ text: string }>;
-        _meta?: { code?: string; grants?: string[] };
+        _meta?: { code?: string; grants?: string[]; [key: string]: unknown };
       };
     };
     assert.ok(pullRes);
     assert.equal(pullRes.result.resultType, "complete");
     assert.equal(pullRes.result.isError, true);
     assert.equal(pullRes.result._meta?.code, "E_POLICY");
+    assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
     assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    // An answer the server could not read is not a denial anybody made, and the refusal says so.
+    assert.match(pullRes.result.content[0]?.text ?? "", /could not be read/);
+    // The refusal is built by the shared result builder, so it carries the routed capsule's identity.
+    assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
+      name: "capsule/netcap_nodecision",
+      version: "1.0.0",
+    });
     assert.equal(hasGrant(loadGrants(home), capsuleId, NET_GRANT), false);
   });
 });

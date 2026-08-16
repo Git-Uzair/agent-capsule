@@ -80,6 +80,21 @@ function callGrants(capsuleId: string, grants: readonly string[]): GrantsStore {
 }
 
 /**
+ * The one refusal text a withheld capability produces. Two places reach this dead end: the retry
+ * below, where the user's answer was `deny`, and the manager's gateway, where the answer never became
+ * a decision at all — declined, cancelled, timed out, or a choice the server could not read. The
+ * `unresolved` wording says which of the two happened instead of asserting a denial nobody made; the
+ * grant is missing either way, so the code and the outcome are the same. It lives here, beside the
+ * deny path that first needed it, so the sentence exists once rather than once per server.
+ */
+export function formatPolicyDenial(grants: readonly string[], unresolved = false): string {
+  const denial = `E_POLICY: user denied ${grants.join(", ")}`;
+  return unresolved
+    ? `${denial}, or the consent answer could not be read — the capability is not granted, so nothing ran.`
+    : denial;
+}
+
+/**
  * One tool call, all the way through `invokeTool` — the same path the CLI takes, so the security model
  * is not re-decided here. What *is* decided here is which failures are the peer's protocol mistake and
  * which are an outcome the model has to read. A name that is not a string, a tool this server does not
@@ -197,7 +212,7 @@ export async function handleToolsCall(
         // a model has to read.
         return {
           resultType: "complete",
-          content: [textContent(`E_POLICY: user denied ${grant}`)],
+          content: [textContent(formatPolicyDenial([grant]))],
           isError: true,
           _meta: { code: "E_POLICY" },
         };

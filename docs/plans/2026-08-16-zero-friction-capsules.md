@@ -134,10 +134,15 @@ Attempt ledger:
 
 ### P2 — The Capsule Manager extension (the platform)
 Status: in_progress
-Failed verify cycles: 1
+Failed verify cycles: 2 (on P2-3)
 Attempt ledger:
-- P2-1/P2-2: core, gateway dispatch, and install -> PASS (attempt 5)
+- P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
+- P2-1/P2-2 attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
+- P2-1/P2-2 attempt 3: single buildGateway owner, exact-name route table, verifyInstalled asserting capsuleId match and trust, intra-capsule collision check, InvalidParams on path+from_downloads, unified allowSuspicious in capsule_list -> FAIL (DUPLICATION of errorResponse, handleMessage, result, SERVER_INFO_META from src/mcp/server.ts)
+- P2-1/P2-2 attempt 4: extract shared RPC dispatcher, result builders, SERVER_INFO_META, CATALOG_TTL_MS to src/mcp/server.ts -> FAIL (DUPLICATION hand-built result in handleToolsCallGateway, dotted capsule name enforcement in gateway namespace)
+- P2-1/P2-2 attempt 5: use bound result builder in handleToolsCallGateway, enforce GATEWAY_NAME_PATTERN ^[a-zA-Z0-9_-]{1,64}$ at install and gateway build -> PASS (P2-1/P2-2 core verified)
 - P2-3 attempt 1: initial elicitation implementation -> FAIL (raw INPUT_REQUIRED on invalid decision, missing timeoutMs on transport.request, duplicate E_CONSENT text builder)
+- P2-3 attempt 2: pass legacySession based on clientElicitation, reuse handleToolsCall E_CONSENT, convert unresolved INPUT_REQUIRED to E_POLICY, add timeoutMs to transport.request -> FAIL (DUPLICATION of createResultBuilder envelope and policy denial text formatting)
 
 
 **P2-1. Manager server core.**

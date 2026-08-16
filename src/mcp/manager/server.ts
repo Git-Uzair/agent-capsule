@@ -4,7 +4,7 @@ import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
 import { homeSidecarPaths } from "../../runtime/invoke.ts";
 import { HOST_VERSION } from "../../version.ts";
 import { BUILTIN_TOOLS } from "../builtin.ts";
-import { handleToolsCall, type McpServerContext } from "../call.ts";
+import { formatPolicyDenial, handleToolsCall, type McpServerContext } from "../call.ts";
 import {
   assertNoToolNameCollision,
   buildToolList,
@@ -372,20 +372,19 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       );
 
       if (retryRes["resultType"] === INPUT_REQUIRED) {
+        // The client answered, but nothing in the answer was a decision this server could use, so the
+        // grant is still missing and there is nobody left to ask: the request ends as the refusal a
+        // model reads, built by the same builder and worded by the same helper as every other one.
         const remainingRequests = asRecord(retryRes["inputRequests"]);
         const remaining = Object.keys(remainingRequests ?? {});
-        const list = remaining.length > 0 ? remaining.join(", ") : missingGrants.join(", ");
-        return {
-          resultType: "complete",
-          content: [
-            {
-              type: "text",
-              text: `E_POLICY: user denied ${list}`,
-            },
-          ],
-          isError: true,
-          _meta: { code: "E_POLICY", grants: remaining.length > 0 ? remaining : missingGrants, ...ctx.resultMeta },
-        };
+        const grants = remaining.length > 0 ? remaining : missingGrants;
+        return createResultBuilder(ctx.resultMeta)(
+          {
+            content: [{ type: "text", text: formatPolicyDenial(grants, true) }],
+            isError: true,
+          },
+          { code: "E_POLICY", grants },
+        );
       }
 
       return retryRes;
