@@ -153,7 +153,14 @@ Attempt ledger:
 - P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> PASS (P2-4 verified)
 - P2-5 attempt 1: initial build-manager-mcpb implementation -> FAIL (inaccurate guest ABI in tool descriptions, empty -o path validation, EOF blank line in paths.ts, missing test coverage for description contents)
 - P2-5 attempt 2: guest ABI descriptions, empty -o validation, paths.ts newline -> FAIL (inaccurate allowed_hosts wildcard semantics in description, missing display_name in manifest)
-- P2-5 attempt 3: state allowed_hosts semantics from policy.matchesPattern (exact host, or `*.` covering subdomains but not the apex, unmatched hosts and IP/loopback blocked) and add display_name "Capsule Manager" to the manager manifest, with tests pinning both -> pending verification
+- P2-5 attempt 3: state allowed_hosts semantics from policy.matchesPattern (exact host, or `*.` covering subdomains but not the apex, unmatched hosts and IP/loopback blocked) and add display_name "Capsule Manager" to the manager manifest, with tests pinning both -> FAIL (log.write omitted from effects enumeration and effects requirement not explained for capsule.log/kv)
+- P2-5 attempt 4: document per-tool effects requirement for capsule.log (log.write), kv, sql, net in tool schemas, add log.write to effects description for create and update, add test executing multi-api authored capsule -> pending verification
+
+
+**Verification Record (P2-5):**
+- Automated acceptance: PASS (tests in `tests/manager-mcpb.test.ts` verify deterministic packaging of 5 entries, manifest schema and display_name, live 2025-06-18 handshake and tool listing with 6 manager tools, description content accuracy, and empty path validation).
+- Manual acceptance (install in Claude Desktop GUI and test in chat): NOT PERFORMED (unattended CLI session; manual verification flagged for human owner).
+
 
 
 

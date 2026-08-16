@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import { fromBuffer, type Entry } from "yauzl";
 import { buildManagerMcpb, runBuildManagerMcpb } from "../src/commands/build-manager-mcpb.ts";
 import { getDefaultIconPath, getDistRuntimePaths } from "../src/core/paths.ts";
+import { createManagerServer } from "../src/mcp/manager/server.ts";
+import type { JsonRpcRequest } from "../src/mcp/transport.ts";
 import { HOST_VERSION } from "../src/version.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -68,6 +70,12 @@ async function withHome(fn: (home: string) => Promise<void>): Promise<void> {
     else process.env.CAPSULE_HOME = previous;
     rmSync(home, { recursive: true, force: true });
   }
+}
+
+let nextId = 0;
+function toolCall(name: string, args: Record<string, unknown>): JsonRpcRequest {
+  nextId += 1;
+  return { jsonrpc: "2.0", id: nextId, method: "tools/call", params: { name, arguments: args } };
 }
 
 describe("capsule build-manager-mcpb", () => {
@@ -201,7 +209,7 @@ describe("capsule build-manager-mcpb", () => {
       });
 
       assert.equal(listRes.id, 2);
-      type SchemaNode = { description?: string; properties?: Record<string, SchemaNode> };
+      type SchemaNode = { description?: string; items?: SchemaNode; properties?: Record<string, SchemaNode> };
       type ToolItem = {
         name: string;
         title?: string;
@@ -241,6 +249,19 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(createSourceDesc.includes("capsule.sql.query"), "source description must cite capsule.sql.query");
       assert.ok(createSourceDesc.includes("capsule.sql.exec"), "source description must cite capsule.sql.exec");
       assert.ok(createSourceDesc.includes("capsule.log"), "source description must cite capsule.log");
+
+      // An advertised API is only callable once the tool declares the op it performs: policy.check
+      // refuses any op missing from that tool's effects list (src/runtime/policy.ts), so a schema that
+      // offers capsule.log without saying so describes a capsule that installs and then fails.
+      assert.match(
+        createSourceDesc,
+        /must .{0,40}be declared in that tool's `effects`/,
+        "source description must state that every op a handler calls has to be declared in that tool's effects",
+      );
+      assert.ok(
+        createSourceDesc.includes('"log.write"'),
+        "source description must name the effect capsule.log requires",
+      );
 
       const createKvDesc = createTool.inputSchema?.properties?.["capabilities"]?.properties?.["kv"]?.description ?? "";
       assert.ok(createKvDesc.includes("capsule.kv.get(key)"), "kv capability description must mention capsule.kv.get(key)");
@@ -292,6 +313,23 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(updateSourceDesc.includes("QuickJS sandbox"));
       assert.ok(updateSourceDesc.includes("globalThis.tools"));
 
+      // Both authoring tools take the same effects list, so both have to explain it the same way —
+      // including log.write, a real EffectName (src/format/manifest.ts) the enumeration used to omit.
+      for (const tool of [createTool, updateTool]) {
+        const effectsDesc = tool.inputSchema?.properties?.["tools"]?.items?.properties?.["effects"]?.description ?? "";
+        assert.match(
+          effectsDesc,
+          /every runtime op the handler calls must/i,
+          `${tool.name} effects description must state that every op the handler calls has to appear in the list`,
+        );
+        for (const effect of ["kv.get", "kv.set", "sql.query", "sql.exec", "net.fetch", "log.write"]) {
+          assert.ok(
+            effectsDesc.includes(effect),
+            `${tool.name} effects description must enumerate ${effect}`,
+          );
+        }
+      }
+
       // Verify capsule_install, capsule_uninstall, capsule_list, capsule_test_tool descriptions
       const installTool = tools.find((t) => t.name === "capsule_install")!;
       assert.ok(installTool.description.includes(".capsule"));
@@ -307,6 +345,85 @@ describe("capsule build-manager-mcpb", () => {
       const testTool = tools.find((t) => t.name === "capsule_test_tool")!;
       assert.ok(testTool.description.includes("sandboxed test invocation"));
       assert.ok(testTool.description.includes("journaled effect count"));
+    });
+  });
+
+  it("runs an authored capsule written the way the schemas instruct: capsule.log and capsule.kv with those effects declared", async () => {
+    await withHome(async (home) => {
+      const server = createManagerServer({ homeDir: home, downloadsDir: join(home, "downloads") });
+      const source = `globalThis.tools = {
+        note({ text }) {
+          capsule.log("note: " + text);
+          const seen = Number(capsule.kv.get("seen") ?? "0") + 1;
+          capsule.kv.set("seen", String(seen));
+          return { logged: text, seen };
+        }
+      };`;
+      const noteTool = {
+        name: "note",
+        title: "Log a note",
+        description: "Logs a note and returns how many notes have been logged.",
+        inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+      };
+
+      const createRes = await server.handleMessage(
+        toolCall("capsule_create", {
+          name: "notebook",
+          title: "Notebook",
+          description: "Logs notes and counts them.",
+          capabilities: { kv: true },
+          source,
+          tools: [{ ...noteTool, effects: ["log.write", "kv.get", "kv.set"] }],
+        }),
+      );
+      assert.ok(createRes && "result" in createRes);
+      const created = createRes.result as {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        structuredContent: { ok: boolean; tools: string[] };
+      };
+      assert.equal(created.isError, false, `capsule_create failed: ${created.content[0]?.text}`);
+      assert.ok(
+        created.structuredContent.tools.includes("notebook__note"),
+        `gateway did not serve notebook__note: ${created.structuredContent.tools.join(", ")}`,
+      );
+
+      // Called through the gateway: the three ops the handler performs are the three it declared, so
+      // the run completes — and the kv write it made is there on the next call.
+      type CallResult = {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        structuredContent: { logged: string; seen: number };
+      };
+      const first = await server.handleMessage(toolCall("notebook__note", { text: "first" }));
+      const firstResult = (first as { result: CallResult }).result;
+      assert.equal(firstResult.isError, false, `notebook__note failed: ${firstResult.content[0]?.text}`);
+      assert.deepEqual(firstResult.structuredContent, { logged: "first", seen: 1 });
+
+      const second = await server.handleMessage(toolCall("notebook__note", { text: "second" }));
+      const secondResult = (second as { result: CallResult }).result;
+      assert.equal(secondResult.isError, false);
+      assert.deepEqual(secondResult.structuredContent, { logged: "second", seen: 2 });
+
+      // Why the schemas have to spell the rule out: the same source with log.write left off the
+      // effects list is created, conformed and installed all the same, and fails at call time.
+      const undeclaredRes = await server.handleMessage(
+        toolCall("capsule_create", {
+          name: "scratchpad",
+          title: "Scratchpad",
+          description: "Logs notes without declaring the log effect.",
+          capabilities: { kv: true },
+          source,
+          tools: [{ ...noteTool, effects: ["kv.get", "kv.set"] }],
+        }),
+      );
+      const undeclared = (undeclaredRes as { result: { isError: boolean; content: Array<{ text: string }> } }).result;
+      assert.equal(undeclared.isError, false, `capsule_create failed: ${undeclared.content[0]?.text}`);
+
+      const denied = await server.handleMessage(toolCall("scratchpad__note", { text: "third" }));
+      const deniedResult = (denied as { result: { isError: boolean; content: Array<{ text: string }> } }).result;
+      assert.equal(deniedResult.isError, true);
+      assert.match(deniedResult.content[0]!.text, /did not declare effect log\.write/);
     });
   });
 

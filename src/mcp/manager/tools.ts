@@ -30,6 +30,23 @@ import {
  */
 export const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
+/**
+ * What a tool's `effects` list means, in the words a capsule author needs. Declaring an effect is not
+ * paperwork about intent: `buildPolicy`'s check refuses any op missing from the list of the tool being
+ * run (src/runtime/policy.ts), so a handler that calls `capsule.log` without `log.write` is created,
+ * conformed and installed, and then fails on its first call. `capsule_create` and `capsule_update`
+ * take the same list and say this once, from here — two copies of the rule would drift apart, and it
+ * was a drifted copy (`log.write` missing from the enumeration) that made the omission look legal.
+ */
+const EFFECTS_DESCRIPTION =
+  "Declared effect identifiers for this tool. Every runtime op the handler calls must appear here, or " +
+  "that call is refused when the tool runs ('tool <name> did not declare effect <op>'). The ops are " +
+  "kv.get and kv.set (`capsule.kv.get` / `capsule.kv.set`), sql.query and sql.exec " +
+  "(`capsule.sql.query` / `capsule.sql.exec`), net.fetch (`capsule.fetch`), log.write (`capsule.log`), " +
+  "and clock.now and random.bytes (`new Date()`, `Date.now()`, `Math.random()`). The kv, sql and net " +
+  "effects additionally require the matching capability; log.write, clock.now and random.bytes " +
+  "require none.";
+
 export const AUTHORING_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_create",
@@ -59,7 +76,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         source: {
           type: "string",
           description:
-            "Guest JavaScript source code evaluated in the QuickJS sandbox. Must define tool handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Sandboxed runtime APIs are available on `globalThis.capsule`: `capsule.fetch(url, init)` (when net capability is declared), `capsule.kv.get(key)` / `capsule.kv.set(key, val)` (when kv enabled), `capsule.sql.query(sql, params)` / `capsule.sql.exec(sql, params)` (when sql enabled), and `capsule.log(message)`.",
+            "Guest JavaScript source code evaluated in the QuickJS sandbox. Must define tool handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Sandboxed runtime APIs are available on `globalThis.capsule`: `capsule.fetch(url, init)` (when net capability is declared), `capsule.kv.get(key)` / `capsule.kv.set(key, val)` (when kv enabled), `capsule.sql.query(sql, params)` / `capsule.sql.exec(sql, params)` (when sql enabled), and `capsule.log(message)` (no capability required). Every op a handler calls must also be declared in that tool's `effects`, or that call is refused when the tool runs: `capsule.log` needs \"log.write\", `capsule.kv.get` / `capsule.kv.set` need \"kv.get\" / \"kv.set\", `capsule.sql.query` / `capsule.sql.exec` need \"sql.query\" / \"sql.exec\", `capsule.fetch` needs \"net.fetch\", and reading the clock or randomness (`new Date()`, `Date.now()`, `Math.random()`) needs \"clock.now\" / \"random.bytes\".",
         },
         tools: {
           type: "array",
@@ -91,7 +108,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
               effects: {
                 type: "array",
                 items: { type: "string" },
-                description: "Declared effect identifiers (e.g. kv.get, kv.set, sql.query, sql.exec, net.fetch).",
+                description: EFFECTS_DESCRIPTION,
               },
             },
           },
@@ -185,7 +202,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
               description: { type: "string" },
               inputSchema: { type: "object" },
               outputSchema: { type: "object" },
-              effects: { type: "array", items: { type: "string" } },
+              effects: { type: "array", items: { type: "string" }, description: EFFECTS_DESCRIPTION },
             },
           },
         },
