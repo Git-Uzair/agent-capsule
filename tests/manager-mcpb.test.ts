@@ -460,6 +460,38 @@ describe("capsule build-manager-mcpb", () => {
         !/\bdrift\b(?!-)/.test(listTool.description),
         "capsule_list description must not name a bare 'drift' state — the real spelling is drift-accepted",
       );
+      // The verification lifecycle this host actually has: verifyInstalled (src/mcp/manager/server.ts)
+      // returns a cached LoadedCapsule per capsuleId and only invalidateCache — on install, update or
+      // uninstall — clears it, so a listing repeats the session's verdict instead of re-reading the file.
+      // The description must promise that, not per-listing re-verification; the test below drives it.
+      assert.match(
+        listTool.description,
+        /verified against the trust store once per manager session/,
+        "capsule_list description must say verification happens once per manager session",
+      );
+      assert.match(
+        listTool.description,
+        /after any registry change \(install, update, uninstall\)/,
+        "capsule_list description must name the registry changes that verify again",
+      );
+      assert.match(
+        listTool.description,
+        /verdict is then cached for the rest of the session/,
+        "capsule_list description must say the verdict is cached for the rest of the session",
+      );
+      assert.match(
+        listTool.description,
+        /noticed on the next session or after the next registry change, not on the next listing/,
+        "capsule_list description must say when a file altered underneath a running manager is noticed",
+      );
+      assert.ok(
+        listTool.description.includes("never re-pins anything"),
+        "capsule_list description must keep saying that verification never re-pins",
+      );
+      assert.ok(
+        !/listing re-verifies/.test(listTool.description),
+        "capsule_list description must not claim a listing re-verifies the installed file",
+      );
 
       const testTool = tools.find((t) => t.name === "capsule_test_tool")!;
       assert.ok(testTool.description.includes("sandboxed test invocation"));
@@ -729,8 +761,8 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(okRow.tools.includes("notes1__peek"), `capsule_list did not report notes1__peek: ${okRow.tools.join(", ")}`);
 
       // 'drift-accepted' belongs to the update, not to any listing: the update that re-pins a changed
-      // tool catalog reports it once, and the next listing — which re-verifies and never re-pins
-      // (§6.2) — reports that same capsule as 'ok'.
+      // tool catalog reports it once, and the next listing — which verifies the new registry entry and
+      // never re-pins (§6.2) — reports that same capsule as 'ok'.
       const updated = await author("capsule_update", {
         name: "notes1",
         source: "globalThis.tools = { peek() { return { ok: true }; }, poke() { return { ok: true }; } };",
@@ -784,6 +816,90 @@ describe("capsule build-manager-mcpb", () => {
       assert.equal(listedTrust("drift-accepted"), "corrupt");
       assert.equal(listedTrust("pinned"), "pinned");
       assert.equal(listedTrust("ok"), "ok");
+    });
+  });
+
+  it("repeats a cached verdict for the rest of the session and verifies again after a registry change", async () => {
+    await withHome(async (home) => {
+      const warnings: string[] = [];
+      const options = {
+        homeDir: home,
+        downloadsDir: join(home, "downloads"),
+        warn: (line: string) => warnings.push(line),
+      };
+      // One server for the whole test: this is the session capsule_list's description talks about.
+      const server = createManagerServer(options);
+      type ListRow = { capsuleId: string; trust: string; tools: string[] };
+      const listRows = async (): Promise<ListRow[]> => {
+        const res = (await server.handleMessage(toolCall("capsule_list", {}))) as {
+          result: { structuredContent: { capsules: ListRow[] } };
+        };
+        return res.result.structuredContent.capsules;
+      };
+      const rowFor = (rows: ListRow[], capsuleId: string): ListRow => {
+        const row = rows.find((candidate) => candidate.capsuleId === capsuleId);
+        assert.ok(row, `capsule_list did not report ${capsuleId}`);
+        return row;
+      };
+      const create = async (name: string): Promise<string> => {
+        const res = (await server.handleMessage(
+          toolCall("capsule_create", {
+            name,
+            title: name,
+            description: "Peeks.",
+            source: "globalThis.tools = { peek() { return { ok: true }; } };",
+            tools: [{ name: "peek", title: "Peek", description: "Returns ok.", inputSchema: { type: "object" } }],
+          }),
+        )) as {
+          result: { isError: boolean; content: Array<{ text: string }>; structuredContent: { capsuleId: string } };
+        };
+        assert.equal(res.result.isError, false, `capsule_create failed: ${res.result.content[0]?.text}`);
+        return res.result.structuredContent.capsuleId;
+      };
+
+      const keptId = await create("notes1");
+      const spareId = await create("notes2");
+
+      // Installing verified both, so this listing reports that verdict.
+      const first = rowFor(await listRows(), keptId);
+      assert.equal(first.trust, "ok");
+      assert.ok(first.tools.includes("notes1__peek"), `capsule_list did not report notes1__peek: ${first.tools.join(", ")}`);
+
+      // Now break the installed file underneath the running manager and delete the trust store it was
+      // checked against. The description says a listing re-reads neither, and it does not: the same
+      // verdict, the same served tools, and nothing new warned because nothing was verified.
+      writeFileSync(installedCapsulePath(keptId, home), Buffer.from("not a capsule"));
+      rmSync(join(home, "trust.json"));
+      const warnedBefore = warnings.length;
+      const cached = rowFor(await listRows(), keptId);
+      assert.deepEqual(
+        { trust: cached.trust, tools: cached.tools },
+        { trust: first.trust, tools: first.tools },
+        "a listing must repeat the session's cached verdict instead of re-verifying the installed file",
+      );
+      assert.equal(
+        warnings.length,
+        warnedBefore,
+        `no verification ran, so nothing can have warned: ${warnings.slice(warnedBefore).join(" | ")}`,
+      );
+
+      // The registry change the description names — an uninstall, of the other capsule at that — is what
+      // clears the cache, so the very next listing verifies the broken bytes and reports them corrupt.
+      const uninstalled = (await server.handleMessage(toolCall("capsule_uninstall", { capsuleId: spareId }))) as {
+        result: { isError: boolean; content: Array<{ text: string }> };
+      };
+      assert.equal(
+        uninstalled.result.isError,
+        false,
+        `capsule_uninstall failed: ${uninstalled.result.content[0]?.text}`,
+      );
+      const reverified = rowFor(await listRows(), keptId);
+      assert.equal(reverified.trust, "corrupt");
+      assert.deepEqual(reverified.tools, [], "a corrupt capsule serves no tools, as the description says");
+      assert.ok(
+        warnings.some((line) => line.includes(`Failed to verify installed capsule ${keptId}`)),
+        `the verification after the registry change must report why the file was refused: ${warnings.join(" | ")}`,
+      );
     });
   });
 

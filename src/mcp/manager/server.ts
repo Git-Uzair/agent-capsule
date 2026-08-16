@@ -135,11 +135,14 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
 
   /**
    * The single place a registry entry turns into bytes this server is willing to run. Two gates, both
-   * of them the point: the file is verified with the trust store live (drift is never auto-accepted
-   * here — only `capsule_install` may re-pin, and only when the user said `accept_drift`), and its
-   * payload digest must still be the registry key, so swapping `capsules/<id>.capsule` for another
-   * validly signed capsule cannot borrow the trusted name. Caching after that is safe because the key
-   * *is* the content address; `invalidateCache` runs on every registry change.
+   * of them the point: the file is verified against the trust store on its first use in this session
+   * (drift is never auto-accepted here — only `capsule_install` may re-pin, and only when the user
+   * said `accept_drift`), and its payload digest must still be the registry key, so swapping
+   * `capsules/<id>.capsule` for another validly signed capsule cannot borrow the trusted name. Caching
+   * that verdict for the rest of the session is safe because the key *is* the content address;
+   * `invalidateCache` runs on every registry change, and nothing else re-verifies — a file changed
+   * underneath a running manager is caught on the next session or after the next registry change,
+   * which is exactly what `capsule_list`'s description promises.
    */
   async function verifyInstalled(
     capsuleId: string,

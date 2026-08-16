@@ -366,8 +366,12 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
     title: "List Installed Capsules",
     description:
       "List all installed Agent Capsules, their publisher keys, trust state, declared capabilities, and " +
-      "exposed gateway tools ('<capsuleName>__<toolName>'). Every listing re-verifies the installed file " +
-      "against the trust store and never re-pins anything, so the trust state is one of exactly four: " +
+      "exposed gateway tools ('<capsuleName>__<toolName>'). Each installed file is verified against the " +
+      "trust store once per manager session — on the session's first listing, and again after any registry " +
+      "change (install, update, uninstall) — and that verification never re-pins anything; its verdict is " +
+      "then cached for the rest of the session, so later listings repeat it and an installed file altered " +
+      "underneath a running manager is noticed on the next session or after the next registry change, not " +
+      "on the next listing. The trust state is one of exactly four: " +
       "'pinned' (this load pinned the name's publisher key and tool catalog), 'ok' (key and tool catalog " +
       "match the pin), 'corrupt' (the file failed signature, digest or trust verification — a tool catalog " +
       "that no longer matches its pin reads as corrupt here until accept_drift re-pins it), or " +
