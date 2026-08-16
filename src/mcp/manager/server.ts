@@ -11,18 +11,20 @@ import {
   type CatalogTool,
 } from "../catalog.ts";
 import {
+  capsuleResultMeta,
+  CATALOG_TTL_MS,
+  createResultBuilder,
+  createRpcDispatcher,
   declaredCapabilities,
   MCP_PROTOCOL_VERSION,
+  SERVER_INFO_META,
   SUPPORTED_PROTOCOL_VERSIONS,
   type McpServer,
+  type RpcHandler,
 } from "../server.ts";
 import {
   JSON_RPC_ERROR,
   RpcFailure,
-  type JsonRpcErrorResponse,
-  type JsonRpcId,
-  type JsonRpcMessage,
-  type JsonRpcResponse,
   type Transport,
 } from "../transport.ts";
 import { confusableSkeleton, sanitizeModelText } from "../../security/text.ts";
@@ -35,9 +37,6 @@ import {
   type ListedCapsule,
   type ToolExecutionResult,
 } from "./tools.ts";
-
-const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
-const CATALOG_TTL_MS = 3_600_000;
 
 /**
  * Why a registry entry is not being served. `"corrupt"` is a file that no longer verifies at all;
@@ -97,11 +96,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     [SERVER_INFO_META]: { name: "capsule-manager", version: HOST_VERSION },
   };
 
-  const result = (body: Record<string, unknown>, meta?: Record<string, unknown>): Record<string, unknown> => ({
-    resultType: "complete",
-    ...body,
-    _meta: { ...meta, ...resultMeta },
-  });
+  const result = createResultBuilder(resultMeta);
 
   const instructions = (): string =>
     "Capsule Manager is a gateway for sandboxed Agent Capsules. " +
@@ -321,22 +316,14 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       journalPath: sidecars.journal,
       homeDir: opts.homeDir,
       warn,
-      resultMeta: {
-        [SERVER_INFO_META]: {
-          name: `capsule/${loaded.manifest.meta.name}`,
-          version: loaded.manifest.meta.version,
-        },
-      },
+      resultMeta: capsuleResultMeta(loaded.manifest),
       legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
     };
 
     return await handleToolsCall({ ...(request ?? {}), name: route.innerName }, ctx);
   }
 
-  const handlers = new Map<
-    string,
-    (params: unknown) => Record<string, unknown> | Promise<Record<string, unknown>>
-  >([
+  const handlers = new Map<string, RpcHandler>([
     [
       "initialize",
       (params) => {
@@ -384,37 +371,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     ["ping", () => result({})],
   ]);
 
-  const errorResponse = (id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse => ({
-    jsonrpc: "2.0",
-    id,
-    error: { code, message },
-  });
-
-  async function handleMessage(
-    msg: JsonRpcMessage,
-  ): Promise<JsonRpcResponse | JsonRpcErrorResponse | void> {
-    if (!("method" in msg) || !("id" in msg)) {
-      return;
-    }
-    const handler = handlers.get(msg.method);
-    if (handler === undefined) {
-      return errorResponse(
-        msg.id,
-        JSON_RPC_ERROR.MethodNotFound,
-        `method not found: ${sanitizeModelText(msg.method, 120)}`,
-      );
-    }
-    try {
-      return { jsonrpc: "2.0", id: msg.id, result: await handler(msg.params) };
-    } catch (err) {
-      if (err instanceof RpcFailure) {
-        return errorResponse(msg.id, err.code, err.message);
-      }
-      const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
-      warn(`${msg.method} failed: ${detail}`);
-      return errorResponse(msg.id, JSON_RPC_ERROR.InternalError, "internal error");
-    }
-  }
+  const handleMessage = createRpcDispatcher(handlers, warn);
 
   return {
     handleMessage,

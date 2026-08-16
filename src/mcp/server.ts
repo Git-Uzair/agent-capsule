@@ -38,11 +38,86 @@ export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
 export const CAPSULE_SPEC = "agentcapsule.org/0.1";
 
 /** A catalog is cheap to rebuild and may be re-signed by its author, so one hour. */
-const CATALOG_TTL_MS = 3_600_000;
+export const CATALOG_TTL_MS = 3_600_000;
 /** Capsule content is immutable by construction — the statement digest covers it — so one day. */
 const CONTENT_TTL_MS = 86_400_000;
 
-const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
+/** The `_meta` key every result stamps this server's identity into. */
+export const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
+
+/** One JSON-RPC method: params in, the body of a `result` out. */
+export type RpcHandler = (params: unknown) => Record<string, unknown> | Promise<Record<string, unknown>>;
+
+/**
+ * The `_meta` a capsule's own results carry. The name is namespaced (`capsule/<name>`) so an agent
+ * talking to several servers can tell a capsule from a native MCP server; the `serverInfo`/`server`
+ * fields carry the capsule's own name. The gateway stamps the same identity on a routed call, so a
+ * result reads the same whether the capsule was served directly or through the manager.
+ */
+export function capsuleResultMeta(manifest: Manifest): Record<string, unknown> {
+  return { [SERVER_INFO_META]: { name: `capsule/${manifest.meta.name}`, version: manifest.meta.version } };
+}
+
+/**
+ * The `result` builder, bound to one server's identity. The server's own metadata is written last,
+ * so a run's `_meta` can never displace the identity of the server that produced it.
+ */
+export function createResultBuilder(
+  resultMeta: Record<string, unknown>,
+): (body: Record<string, unknown>, meta?: Record<string, unknown>) => Record<string, unknown> {
+  return (body, meta) => ({
+    resultType: "complete",
+    ...body,
+    _meta: { ...meta, ...resultMeta },
+  });
+}
+
+/**
+ * The JSON-RPC envelope every server on this host answers in: method lookup, the `result` wrapper,
+ * and the two failure shapes. It is a function of the handler table alone, so the capsule server and
+ * the manager gateway differ only in the handlers they register — never in what a peer sees on the
+ * wire for an unknown method or a thrown handler.
+ */
+export function createRpcDispatcher(
+  handlers: ReadonlyMap<string, RpcHandler>,
+  warn: (line: string) => void,
+): (msg: JsonRpcMessage) => Promise<JsonRpcResponse | JsonRpcErrorResponse | void> {
+  const errorResponse = (id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse => ({
+    jsonrpc: "2.0",
+    id,
+    error: { code, message },
+  });
+
+  return async function handleMessage(
+    msg: JsonRpcMessage,
+  ): Promise<JsonRpcResponse | JsonRpcErrorResponse | void> {
+    // Notifications and responses are answered with nothing: this revision has no server-initiated
+    // requests, so there is never anything to say back.
+    if (!("method" in msg) || !("id" in msg)) {
+      return;
+    }
+    const handler = handlers.get(msg.method);
+    if (handler === undefined) {
+      return errorResponse(
+        msg.id,
+        JSON_RPC_ERROR.MethodNotFound,
+        `method not found: ${sanitizeModelText(msg.method, 120)}`,
+      );
+    }
+    try {
+      return { jsonrpc: "2.0", id: msg.id, result: await handler(msg.params) };
+    } catch (err) {
+      if (err instanceof RpcFailure) {
+        return errorResponse(msg.id, err.code, err.message);
+      }
+      // A container or host failure is our problem, not the peer's: it gets a code and a diagnostic
+      // on stderr, never our internals on the wire.
+      const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
+      warn(`${msg.method} failed: ${detail}`);
+      return errorResponse(msg.id, JSON_RPC_ERROR.InternalError, "internal error");
+    }
+  };
+}
 
 export type McpServerOptions = {
   capsule: LoadedCapsule;
@@ -100,9 +175,7 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
   let negotiatedVersion: string = MCP_PROTOCOL_VERSION;
 
   const serverInfo = { name: manifest.meta.name, version: manifest.meta.version };
-  // The `_meta` name is namespaced (`capsule/<name>`) so an agent talking to several servers can tell
-  // a capsule from a native MCP server; the `serverInfo`/`server` fields carry the capsule's own name.
-  const resultMeta = { [SERVER_INFO_META]: { name: `capsule/${serverInfo.name}`, version: serverInfo.version } };
+  const resultMeta = capsuleResultMeta(manifest);
 
   // Everything `tools/call` is allowed to know, settled once. The served names are the catalog's own,
   // so a tool suppressed for suspicious text is not callable by name either — suppression is a
@@ -120,13 +193,7 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
   };
 
-  const result = (body: Record<string, unknown>, meta?: Record<string, unknown>): Record<string, unknown> => ({
-    resultType: "complete",
-    ...body,
-    // The server's own metadata is written last, so a run's `_meta` can never displace the identity
-    // of the server that produced it.
-    _meta: { ...meta, ...resultMeta },
-  });
+  const result = createResultBuilder(resultMeta);
 
   const capabilities = (): Record<string, unknown> => ({
     tools: { listChanged: false },
@@ -177,7 +244,7 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     });
   }
 
-  const handlers = new Map<string, (params: unknown) => Record<string, unknown> | Promise<Record<string, unknown>>>([
+  const handlers = new Map<string, RpcHandler>([
     [
       "initialize",
       (params) => {
@@ -227,41 +294,7 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     ["ping", () => result({})],
   ]);
 
-  const errorResponse = (id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse => ({
-    jsonrpc: "2.0",
-    id,
-    error: { code, message },
-  });
-
-  async function handleMessage(
-    msg: JsonRpcMessage,
-  ): Promise<JsonRpcResponse | JsonRpcErrorResponse | void> {
-    // Notifications and responses are answered with nothing: this revision has no server-initiated
-    // requests, so there is never anything to say back.
-    if (!("method" in msg) || !("id" in msg)) {
-      return;
-    }
-    const handler = handlers.get(msg.method);
-    if (handler === undefined) {
-      return errorResponse(
-        msg.id,
-        JSON_RPC_ERROR.MethodNotFound,
-        `method not found: ${sanitizeModelText(msg.method, 120)}`,
-      );
-    }
-    try {
-      return { jsonrpc: "2.0", id: msg.id, result: await handler(msg.params) };
-    } catch (err) {
-      if (err instanceof RpcFailure) {
-        return errorResponse(msg.id, err.code, err.message);
-      }
-      // A container or host failure is our problem, not the peer's: it gets a code and a diagnostic
-      // on stderr, never our internals on the wire.
-      const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
-      warn(`${msg.method} failed: ${detail}`);
-      return errorResponse(msg.id, JSON_RPC_ERROR.InternalError, "internal error");
-    }
-  }
+  const handleMessage = createRpcDispatcher(handlers, warn);
 
   return {
     handleMessage,
