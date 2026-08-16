@@ -3,7 +3,8 @@ import { dirname } from "node:path";
 import { asRecord } from "../../core/canonical.ts";
 import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
-import { buildToolList, type CatalogTool } from "../catalog.ts";
+import { BUILTIN_TOOLS } from "../builtin.ts";
+import { assertNoToolNameCollision, buildToolList, type CatalogTool } from "../catalog.ts";
 import { declaredCapabilities } from "../server.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
 import { scanTextTree } from "../../security/text.ts";
@@ -11,7 +12,6 @@ import { scanDownloads, type DownloadCandidate } from "./downloads.ts";
 import {
   addInstalledCapsule,
   installedCapsulePath,
-  loadInstalledStore,
   removeInstalledCapsule,
   removeInstalledCapsulesByName,
 } from "./registry.ts";
@@ -93,6 +93,8 @@ export async function handleCapsuleInstall(
     warn: (line: string) => void;
     notifyListChanged: () => void;
     invalidateCache: () => void;
+    /** The names the gateway really serves for a capsuleId, so the summary cannot over-promise. */
+    servedTools: (capsuleId: string) => Promise<string[]>;
   },
 ): Promise<ToolExecutionResult> {
   const args = asRecord(rawArgs) ?? {};
@@ -100,10 +102,23 @@ export async function handleCapsuleInstall(
   const rawPath = typeof args["path"] === "string" ? args["path"].trim() : undefined;
   const acceptDrift = args["accept_drift"] === true;
   const allowSuspicious = args["allow_suspicious"] === true;
+  const named = rawPath !== undefined && rawPath !== "";
+
+  // Refused rather than resolved: with both supplied, either answer installs a file the caller did
+  // not ask about, and installing something the user never named is the one thing this tool may not
+  // do. The caller re-sends the one it meant.
+  if (named && fromDownloads) {
+    throw new RpcFailure(
+      JSON_RPC_ERROR.InvalidParams,
+      "capsule_install takes either 'path' or 'from_downloads: true', not both",
+    );
+  }
 
   let targetFile: string;
 
-  if (fromDownloads || (rawPath === undefined && fromDownloads)) {
+  if (named) {
+    targetFile = rawPath as string;
+  } else if (fromDownloads) {
     const candidates = scanDownloads(opts.downloadsDir);
     if (candidates.length === 0) {
       const text = "No .capsule files found in Downloads folder. Please specify the file path directly with { path: \"...\" }.";
@@ -125,8 +140,6 @@ export async function handleCapsuleInstall(
       };
     }
     targetFile = (candidates[0] as DownloadCandidate).path;
-  } else if (rawPath !== undefined && rawPath !== "") {
-    targetFile = rawPath;
   } else {
     throw new RpcFailure(
       JSON_RPC_ERROR.InvalidParams,
@@ -163,6 +176,25 @@ export async function handleCapsuleInstall(
     }
     const text = `Failed to load capsule: ${err instanceof Error ? err.message : String(err)}`;
     return { text, structured: { ok: false, error: "E_CONTAINER", message: text }, isError: true };
+  }
+
+  // Refused at the door, exactly as the direct server refuses such a capsule before it serves
+  // anything: two tool names that read as one name are a phishing vector inside the capsule's own
+  // list, and `<capsuleName>__` prefixes both halves of the pair alike, so the gateway namespace
+  // inherits the ambiguity. Not overridable — there is no honest reason to declare both. Built-ins
+  // join the check because the reserved-prefix rule is case-sensitive (`Capsule_info` is legal).
+  // Names are `[a-zA-Z0-9_-]{1,64}` per schema, so the reported pair is safe to interpolate.
+  try {
+    assertNoToolNameCollision([
+      ...loaded.manifest.tools.map((tool) => tool.name),
+      ...BUILTIN_TOOLS.map((tool) => tool.name),
+    ]);
+  } catch (err) {
+    const detail = err instanceof CapsuleError ? err.message : String(err);
+    const text =
+      `Security Alert (Confusable Tool Names): Capsule '${loaded.manifest.meta.name}' declares two tool ` +
+      `names that read as the same name (${detail}). Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
   }
 
   // Screen for suspicious prompt injection markers or identifiers
@@ -208,18 +240,21 @@ export async function handleCapsuleInstall(
   opts.notifyListChanged();
 
   const caps = declaredCapabilities(loaded.manifest);
-  const servedTools = buildToolList(loaded.manifest, {
-    allowSuspicious,
-    warn: opts.warn,
-  });
-  const gatewayTools = servedTools.map((t) => `${loaded.manifest.meta.name}__${t.name}`);
+  // Read back from the gateway rather than from this manifest: a capsule whose names collide with one
+  // already installed is suppressed there, and a summary that named tools nobody can call would send
+  // the agent looking for them.
+  const gatewayTools = await opts.servedTools(loaded.capsuleId);
   const text =
     `Installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.\n` +
     `• Capsule ID: ${loaded.capsuleId}\n` +
     `• Publisher Key: ${loaded.keyId}\n` +
     `• Trust State: ${loaded.trust}\n` +
     `• Declared Capabilities: ${caps}\n` +
-    `• Exposed Tools: ${gatewayTools.length > 0 ? gatewayTools.join(", ") : "none"}`;
+    `• Exposed Tools: ${gatewayTools.length > 0 ? gatewayTools.join(", ") : "none"}` +
+    (gatewayTools.length === 0
+      ? `\n• Warning: no tools are exposed — its tool names collide with an already installed capsule, ` +
+        `so this capsule is suppressed. Uninstall the other capsule to use this one.`
+      : "");
 
   return {
     text,
@@ -285,60 +320,60 @@ export function handleCapsuleUninstall(
   }
 }
 
-export async function handleCapsuleList(opts: {
-  homeDir?: string;
-  getCapsule: (capsuleId: string, file: string) => Promise<LoadedCapsule | undefined>;
-}): Promise<ToolExecutionResult> {
-  const store = loadInstalledStore(opts.homeDir);
-  const entries = Object.entries(store.capsules);
-  if (entries.length === 0) {
+/**
+ * One installed capsule as the gateway resolved it: its verified metadata, its trust state, and the
+ * gateway names it actually serves.
+ */
+export type ListedCapsule = {
+  capsuleId: string;
+  name: string;
+  version: string;
+  file: string;
+  installedAt: string;
+  publisherKey: string;
+  /** `LoadedCapsule["trust"]`, or `corrupt`/`unverifiable` when the installed file failed its gates. */
+  trust: string;
+  capabilities: string;
+  tools: string[];
+  note?: string;
+};
+
+/**
+ * Formatting only. The rows come from the same pass that built `tools/list` and the dispatch table, so
+ * what the user is told is served is what is served — this cannot recompute it differently, because it
+ * does not recompute it at all.
+ */
+export function handleCapsuleList(capsules: readonly ListedCapsule[]): ToolExecutionResult {
+  if (capsules.length === 0) {
     const text = "No capsules currently installed. Use capsule_install to install a capsule.";
     return { text, structured: { capsules: [], message: text }, isError: false };
   }
 
-  const capsulesInfo: Array<Record<string, unknown>> = [];
-  const lines: string[] = [`Installed Capsules (${entries.length}):`];
+  const lines: string[] = [`Installed Capsules (${capsules.length}):`];
 
-  for (const [capsuleId, entry] of entries) {
-    const loaded = await opts.getCapsule(capsuleId, entry.file);
-    const served = loaded
-      ? buildToolList(loaded.manifest, {
-          allowSuspicious: entry.allowSuspicious === true,
-          warn: () => {},
-        })
-      : [];
-    const tools = served.map((t) => `${entry.name}__${t.name}`);
-    const caps = loaded ? declaredCapabilities(loaded.manifest) : "unknown";
-    const trust = loaded?.trust ?? "corrupt";
-
-    capsulesInfo.push({
-      capsuleId,
-      name: entry.name,
-      version: entry.version,
-      file: entry.file,
-      installedAt: entry.installedAt,
-      publisherKey: loaded?.keyId ?? "unknown",
-      trust,
-      capabilities: caps,
-      tools,
-    });
-    if (loaded) {
-      lines.push(`• ${entry.name}@${entry.version} (id: ${capsuleId})`);
-      lines.push(`  - Installed: ${entry.installedAt}`);
-      lines.push(`  - Capabilities: ${caps}`);
-      lines.push(`  - Tools: ${tools.length > 0 ? tools.join(", ") : "none"}`);
+  for (const capsule of capsules) {
+    const verified = capsule.trust !== "corrupt" && capsule.trust !== "unverifiable";
+    lines.push(
+      `• ${capsule.name}@${capsule.version} (id: ${capsule.capsuleId})` +
+        (verified ? "" : " [CORRUPT/UNVERIFIABLE]"),
+    );
+    lines.push(`  - Installed: ${capsule.installedAt}`);
+    lines.push(`  - Trust: ${capsule.trust}`);
+    if (verified) {
+      lines.push(`  - Capabilities: ${capsule.capabilities}`);
+      lines.push(`  - Tools: ${capsule.tools.length > 0 ? capsule.tools.join(", ") : "none"}`);
     } else {
-      lines.push(`• ${entry.name}@${entry.version} (id: ${capsuleId}) [CORRUPT/UNVERIFIABLE]`);
-      lines.push(`  - Installed: ${entry.installedAt}`);
-      lines.push(`  - Trust: ${trust}`);
-      lines.push(`  - File: ${entry.file} (failed to load or verify)`);
+      lines.push(`  - File: ${capsule.file} (failed to load or verify)`);
+    }
+    if (capsule.note !== undefined) {
+      lines.push(`  - Note: ${capsule.note}`);
     }
   }
 
   const text = lines.join("\n");
   return {
     text,
-    structured: { capsules: capsulesInfo, message: text },
+    structured: { capsules: capsules.map((capsule) => ({ ...capsule })), message: text },
     isError: false,
   };
 }

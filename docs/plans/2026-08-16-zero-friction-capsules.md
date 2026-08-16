@@ -134,10 +134,11 @@ Attempt ledger:
 
 ### P2 — The Capsule Manager extension (the platform)
 Status: in_progress
-Failed verify cycles: 1
+Failed verify cycles: 2
 Attempt ledger:
 - attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
-- attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> PASS
+- attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
+
 
 
 **P2-1. Manager server core.**

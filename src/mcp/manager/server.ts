@@ -3,6 +3,7 @@ import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
 import { homeSidecarPaths } from "../../runtime/invoke.ts";
 import { HOST_VERSION } from "../../version.ts";
+import { BUILTIN_TOOLS } from "../builtin.ts";
 import { handleToolsCall, type McpServerContext } from "../call.ts";
 import {
   assertNoToolNameCollision,
@@ -10,7 +11,7 @@ import {
   type CatalogTool,
 } from "../catalog.ts";
 import {
-  CAPSULE_SPEC,
+  declaredCapabilities,
   MCP_PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   type McpServer,
@@ -31,10 +32,37 @@ import {
   handleCapsuleList,
   handleCapsuleUninstall,
   MANAGER_TOOLS,
+  type ListedCapsule,
+  type ToolExecutionResult,
 } from "./tools.ts";
 
 const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
 const CATALOG_TTL_MS = 3_600_000;
+
+/**
+ * Why a registry entry is not being served. `"corrupt"` is a file that no longer verifies at all;
+ * `"unverifiable"` is a file that verifies but is no longer the capsule the registry pinned.
+ */
+type VerifyFailure = "corrupt" | "unverifiable";
+
+/** Where one advertised gateway name goes, and what that capsule is allowed to run. */
+type GatewayRoute = {
+  loaded: LoadedCapsule;
+  innerName: string;
+  served: ReadonlySet<string>;
+};
+
+/**
+ * One snapshot of the installed set: the tools the merged catalog advertises, the routes a
+ * `tools/call` may reach, and the rows `capsule_list` reports. They are built together on purpose —
+ * three separate derivations of "what does this capsule serve" is exactly how an advertised tool
+ * became callable while `capsule_list` denied it existed.
+ */
+type Gateway = {
+  tools: CatalogTool[];
+  routes: Map<string, GatewayRoute>;
+  capsules: ListedCapsule[];
+};
 
 export type ManagerServerOptions = {
   homeDir?: string;
@@ -97,82 +125,162 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     }
   }
 
-  async function getLoadedCapsule(capsuleId: string, file: string): Promise<LoadedCapsule | undefined> {
+  /**
+   * The single place a registry entry turns into bytes this server is willing to run. Two gates, both
+   * of them the point: the file is verified with the trust store live (drift is never auto-accepted
+   * here — only `capsule_install` may re-pin, and only when the user said `accept_drift`), and its
+   * payload digest must still be the registry key, so swapping `capsules/<id>.capsule` for another
+   * validly signed capsule cannot borrow the trusted name. Caching after that is safe because the key
+   * *is* the content address; `invalidateCache` runs on every registry change.
+   */
+  async function verifyInstalled(
+    capsuleId: string,
+    entry: InstalledEntry,
+  ): Promise<LoadedCapsule | VerifyFailure> {
     const cached = loadedCapsuleCache.get(capsuleId);
     if (cached !== undefined) {
       return cached;
     }
+    let loaded: LoadedCapsule;
     try {
-      // Re-load without trust re-pinning since trust was verified at install time
-      const loaded = await loadCapsule(file, {
-        trust: false,
-        acceptDrift: true,
-        homeDir: opts.homeDir,
-      });
-      loadedCapsuleCache.set(capsuleId, loaded);
-      return loaded;
+      loaded = await loadCapsule(entry.file, { trust: true, homeDir: opts.homeDir });
     } catch (err) {
-      warn(`Failed to load installed capsule ${capsuleId} from ${file}: ${String(err)}`);
-      return undefined;
+      const detail = err instanceof CapsuleError ? `${err.code}: ${err.message}` : String(err);
+      warn(`Failed to verify installed capsule ${capsuleId} from ${entry.file}: ${detail}`);
+      return "corrupt";
     }
+    if (loaded.capsuleId !== capsuleId) {
+      warn(
+        `Refusing installed capsule ${capsuleId}: ${entry.file} now holds ${loaded.capsuleId} ` +
+          `('${loaded.manifest.meta.name}'), so the registry pin no longer describes these bytes.`,
+      );
+      return "unverifiable";
+    }
+    loadedCapsuleCache.set(capsuleId, loaded);
+    return loaded;
   }
 
-  async function getMergedToolList(): Promise<CatalogTool[]> {
-    const merged: CatalogTool[] = [...MANAGER_TOOLS];
-    const seenSkeletons = new Map<string, string>();
-
-    for (const tool of MANAGER_TOOLS) {
-      seenSkeletons.set(confusableSkeleton(tool.name), tool.name);
-    }
-
-    const store = loadInstalledStore(opts.homeDir);
-    // Sort installed capsules by installedAt ascending for deterministic precedence
-    const sortedEntries = Object.entries(store.capsules).sort((a, b) =>
-      a[1].installedAt.localeCompare(b[1].installedAt),
+  async function buildGateway(): Promise<Gateway> {
+    const tools: CatalogTool[] = [...MANAGER_TOOLS];
+    const routes = new Map<string, GatewayRoute>();
+    const capsules: ListedCapsule[] = [];
+    // The manager's own names are part of the merged namespace, so a capsule can never shadow them.
+    const seen = new Map<string, string>(
+      MANAGER_TOOLS.map((tool) => [confusableSkeleton(tool.name), tool.name]),
     );
 
-    for (const [capsuleId, entry] of sortedEntries) {
-      const loaded = await getLoadedCapsule(capsuleId, entry.file);
-      if (!loaded) continue;
+    const store = loadInstalledStore(opts.homeDir);
+    // Oldest install wins a collision, so which capsule gets suppressed never depends on key order;
+    // capsuleId breaks a tie between two installs that landed in the same millisecond.
+    const sorted = Object.entries(store.capsules).sort(
+      (a, b) => a[1].installedAt.localeCompare(b[1].installedAt) || a[0].localeCompare(b[0]),
+    );
 
-      const allowSuspicious = opts.allowSuspicious === true || entry.allowSuspicious === true;
-      const capsuleTools = buildToolList(loaded.manifest, {
-        allowSuspicious,
-        warn,
-      });
-
-      let hasCollision = false;
-      const candidateTools: CatalogTool[] = [];
-
-      for (const tool of capsuleTools) {
-        const prefixedName = `${loaded.manifest.meta.name}__${tool.name}`;
-        const skeleton = confusableSkeleton(prefixedName);
-        const first = seenSkeletons.get(skeleton);
-        if (first !== undefined) {
-          warn(
-            `Collision detected: tool '${prefixedName}' in capsule '${loaded.manifest.meta.name}' ` +
-              `collides with already registered tool '${first}'. Suppressing newer capsule.`,
-          );
-          hasCollision = true;
-          break;
-        }
-        candidateTools.push({
-          ...tool,
-          name: prefixedName,
-          title: `${loaded.manifest.meta.name}: ${tool.title}`,
-        });
+    for (const [capsuleId, entry] of sorted) {
+      const verified = await verifyInstalled(capsuleId, entry);
+      const row: ListedCapsule = {
+        capsuleId,
+        name: entry.name,
+        version: entry.version,
+        file: entry.file,
+        installedAt: entry.installedAt,
+        publisherKey: "unknown",
+        trust: typeof verified === "string" ? verified : verified.trust,
+        capabilities: "unknown",
+        tools: [],
+      };
+      capsules.push(row);
+      if (typeof verified === "string") {
+        row.note =
+          verified === "unverifiable"
+            ? "installed file no longer matches the pinned capsuleId — not served"
+            : "installed file failed verification — not served";
+        continue;
       }
 
-      if (!hasCollision) {
-        for (const candidate of candidateTools) {
-          seenSkeletons.set(confusableSkeleton(candidate.name), candidate.name);
-          merged.push(candidate);
-        }
+      const loaded = verified;
+      // The verified manifest outranks the registry row: the pin binds these bytes, not the JSON.
+      row.name = loaded.manifest.meta.name;
+      row.version = loaded.manifest.meta.version;
+      row.publisherKey = loaded.keyId;
+      row.capabilities = declaredCapabilities(loaded.manifest);
+
+      // The refusal the direct server makes before it ever opens a transport, applied per capsule:
+      // two names one human reads as one are a phishing vector inside that capsule's own list, and a
+      // shared `<name>__` prefix carries the pair into the merged namespace unchanged — so a
+      // cross-capsule check alone never sees it. Built-ins are included because the reserved-prefix
+      // rule is case-sensitive: `Capsule_info` is a legal manifest name.
+      try {
+        assertNoToolNameCollision([
+          ...loaded.manifest.tools.map((tool) => tool.name),
+          ...BUILTIN_TOOLS.map((tool) => tool.name),
+        ]);
+      } catch (err) {
+        const detail = err instanceof CapsuleError ? err.message : String(err);
+        warn(`Collision detected inside capsule '${row.name}': ${detail}. Suppressing capsule.`);
+        row.note = `suppressed: ${detail}`;
+        continue;
+      }
+
+      const allowSuspicious = opts.allowSuspicious === true || entry.allowSuspicious === true;
+      const served = buildToolList(loaded.manifest, { allowSuspicious, warn });
+      const prefix = `${row.name}__`;
+      const clash = served
+        .map((tool) => seen.get(confusableSkeleton(`${prefix}${tool.name}`)))
+        .find((first) => first !== undefined);
+      if (clash !== undefined) {
+        warn(
+          `Collision detected: capsule '${row.name}' exposes a tool that collides with already ` +
+            `registered tool '${clash}'. Suppressing newer capsule.`,
+        );
+        row.note = `suppressed: tool name collides with '${clash}'`;
+        continue;
+      }
+
+      const servedNames: ReadonlySet<string> = new Set(served.map((tool) => tool.name));
+      for (const tool of served) {
+        const name = `${prefix}${tool.name}`;
+        seen.set(confusableSkeleton(name), name);
+        tools.push({ ...tool, name, title: `${row.name}: ${tool.title}` });
+        routes.set(name, { loaded, innerName: tool.name, served: servedNames });
+        row.tools.push(name);
       }
     }
 
-    return merged;
+    return { tools, routes, capsules };
   }
+
+  /** What the gateway actually serves for one capsuleId — the summary `capsule_install` reads back. */
+  const servedTools = async (capsuleId: string): Promise<string[]> =>
+    (await buildGateway()).capsules.find((row) => row.capsuleId === capsuleId)?.tools ?? [];
+
+  const managerTools = new Map<
+    string,
+    (args: unknown) => ToolExecutionResult | Promise<ToolExecutionResult>
+  >([
+    [
+      "capsule_install",
+      (args) =>
+        handleCapsuleInstall(args, {
+          homeDir: opts.homeDir,
+          downloadsDir: opts.downloadsDir,
+          warn,
+          notifyListChanged,
+          invalidateCache,
+          servedTools,
+        }),
+    ],
+    [
+      "capsule_uninstall",
+      (args) =>
+        handleCapsuleUninstall(args, {
+          homeDir: opts.homeDir,
+          notifyListChanged,
+          invalidateCache,
+        }),
+    ],
+    ["capsule_list", async () => handleCapsuleList((await buildGateway()).capsules)],
+  ]);
 
   async function handleToolsCallGateway(params: unknown): Promise<Record<string, unknown>> {
     const request = asRecord(params);
@@ -181,141 +289,48 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "tools/call needs a non-empty string name");
     }
 
-    // Direct manager tools
-    if (fullName.startsWith("capsule_") && !fullName.includes("__")) {
-      const managerTool = MANAGER_TOOLS.find((t) => t.name === fullName);
-      if (!managerTool) {
-        throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `unknown manager tool: ${fullName}`);
-      }
-
-      const rawArgs = request?.["arguments"];
-
-      if (fullName === "capsule_install") {
-        const res = await handleCapsuleInstall(rawArgs, {
-          homeDir: opts.homeDir,
-          downloadsDir: opts.downloadsDir,
-          warn,
-          notifyListChanged,
-          invalidateCache,
-        });
-        return {
-          resultType: "complete",
-          content: [{ type: "text", text: res.text }],
-          structuredContent: res.structured,
-          isError: res.isError,
-          _meta: { ...resultMeta },
-        };
-      }
-
-      if (fullName === "capsule_uninstall") {
-        const res = handleCapsuleUninstall(rawArgs, {
-          homeDir: opts.homeDir,
-          notifyListChanged,
-          invalidateCache,
-        });
-        return {
-          resultType: "complete",
-          content: [{ type: "text", text: res.text }],
-          structuredContent: res.structured,
-          isError: res.isError,
-          _meta: { ...resultMeta },
-        };
-      }
-
-      if (fullName === "capsule_list") {
-        const res = await handleCapsuleList({
-          homeDir: opts.homeDir,
-          getCapsule: getLoadedCapsule,
-        });
-        return {
-          resultType: "complete",
-          content: [{ type: "text", text: res.text }],
-          structuredContent: res.structured,
-          isError: res.isError,
-          _meta: { ...resultMeta },
-        };
-      }
-
-      throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `unknown manager tool: ${fullName}`);
+    const managerTool = managerTools.get(fullName);
+    if (managerTool !== undefined) {
+      const res = await managerTool(request?.["arguments"]);
+      return {
+        resultType: "complete",
+        content: [{ type: "text", text: res.text }],
+        structuredContent: res.structured,
+        isError: res.isError,
+        _meta: { ...resultMeta },
+      };
     }
 
-    // Gateway dispatched tools: <capsuleName>__<toolName>
-    if (fullName.includes("__")) {
-      const store = loadInstalledStore(opts.homeDir);
-      let targetEntry: InstalledEntry | undefined;
-      let targetCapsuleId: string | undefined;
-      let innerToolName: string | undefined;
-      let matchedCapsuleName: string | undefined;
+    // Gateway dispatch reads the routing table the merged catalog was built from, so the name the
+    // model saw is the name that resolves: no prefix guessing, and a tool the catalog withheld — a
+    // suppressed tool, a suppressed capsule, an unverifiable file — is not reachable by name either.
+    const route = (await buildGateway()).routes.get(fullName);
+    if (route === undefined) {
+      throw new RpcFailure(
+        JSON_RPC_ERROR.InvalidParams,
+        `unknown tool: ${sanitizeModelText(fullName, 120)}`,
+      );
+    }
 
-      // Find installed capsule whose prefix matches `entry.name + "__"`
-      // Prefer longest matching name in case of nested/overlapping names
-      for (const [cid, entry] of Object.entries(store.capsules)) {
-        const prefix = `${entry.name}__`;
-        if (fullName.startsWith(prefix)) {
-          if (matchedCapsuleName === undefined || entry.name.length > matchedCapsuleName.length) {
-            matchedCapsuleName = entry.name;
-            targetEntry = entry;
-            targetCapsuleId = cid;
-            innerToolName = fullName.slice(prefix.length);
-          }
-        }
-      }
-
-      if (!targetEntry || !targetCapsuleId || innerToolName === undefined || innerToolName === "") {
-        throw new RpcFailure(
-          JSON_RPC_ERROR.InvalidParams,
-          `unknown tool: ${sanitizeModelText(fullName, 120)}`,
-        );
-      }
-
-      const loaded = await getLoadedCapsule(targetCapsuleId, targetEntry.file);
-      if (!loaded) {
-        throw new RpcFailure(
-          JSON_RPC_ERROR.InvalidParams,
-          `failed to load capsule '${targetEntry.name}'`,
-        );
-      }
-
-      const allowSuspicious = opts.allowSuspicious === true || targetEntry.allowSuspicious === true;
-      const servedTools = buildToolList(loaded.manifest, {
-        allowSuspicious,
-        warn,
-      });
-
-      const toolServed = servedTools.some((t) => t.name === innerToolName);
-      if (!toolServed) {
-        throw new RpcFailure(
-          JSON_RPC_ERROR.InvalidParams,
-          `tool '${innerToolName}' is not served by capsule '${targetEntry.name}'`,
-        );
-      }
-
-      const sidecars = homeSidecarPaths(loaded.capsuleId, opts.homeDir);
-      const ctx: McpServerContext = {
-        capsule: loaded,
-        served: new Set(servedTools.map((t) => t.name)),
-        statePath: sidecars.app,
-        journalPath: sidecars.journal,
-        homeDir: opts.homeDir,
-        warn,
-        resultMeta: {
-          [SERVER_INFO_META]: {
-            name: `capsule/${loaded.manifest.meta.name}`,
-            version: loaded.manifest.meta.version,
-          },
+    const loaded = route.loaded;
+    const sidecars = homeSidecarPaths(loaded.capsuleId, opts.homeDir);
+    const ctx: McpServerContext = {
+      capsule: loaded,
+      served: route.served,
+      statePath: sidecars.app,
+      journalPath: sidecars.journal,
+      homeDir: opts.homeDir,
+      warn,
+      resultMeta: {
+        [SERVER_INFO_META]: {
+          name: `capsule/${loaded.manifest.meta.name}`,
+          version: loaded.manifest.meta.version,
         },
-        legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
-      };
+      },
+      legacySession: () => negotiatedVersion !== MCP_PROTOCOL_VERSION,
+    };
 
-      const rewrittenParams = {
-        ...(asRecord(params) ?? {}),
-        name: innerToolName,
-      };
-
-      return await handleToolsCall(rewrittenParams, ctx);
-    }
-
-    throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `unknown tool: ${sanitizeModelText(fullName, 120)}`);
+    return await handleToolsCall({ ...(request ?? {}), name: route.innerName }, ctx);
   }
 
   const handlers = new Map<
@@ -357,7 +372,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
           cacheScope: "public",
         }),
     ],
-    ["tools/list", async () => result({ tools: await getMergedToolList(), ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
+    ["tools/list", async () => result({ tools: (await buildGateway()).tools, ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
     ["tools/call", handleToolsCallGateway],
     ["resources/list", () => result({ resources: [], ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
     [
