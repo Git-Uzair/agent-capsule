@@ -6,7 +6,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { packDirectory } from "../src/format/capsule.ts";
-import { createManagerServer } from "../src/mcp/manager/server.ts";
+import { createManagerServer, ELICITATION_TIMEOUT_MS } from "../src/mcp/manager/server.ts";
 import { DECISION, DECISION_PROPERTY, ELICITATION_METHOD } from "../src/mcp/mrtr.ts";
 import { MCP_PROTOCOL_VERSION } from "../src/mcp/server.ts";
 import {
@@ -14,6 +14,7 @@ import {
   type JsonRpcMessage,
   type JsonRpcRequest,
   type Transport,
+  type TransportRequestOptions,
 } from "../src/mcp/transport.ts";
 import { hasGrant, loadGrants } from "../src/security/grants.ts";
 
@@ -71,20 +72,20 @@ async function packNetCapsule(home: string, name: string = "netapp"): Promise<st
 }
 
 function createMockTransport(opts: {
-  onRequest?: (method: string, params: unknown, id: JsonRpcId) => Promise<unknown> | unknown;
+  onRequest?: (method: string, params: unknown, id: JsonRpcId, reqOpts?: TransportRequestOptions) => Promise<unknown> | unknown;
 } = {}): {
   transport: Transport;
   sent: JsonRpcMessage[];
   deliver(msg: JsonRpcMessage): Promise<void>;
-  requests: Array<{ id: JsonRpcId; method: string; params: unknown }>;
+  requests: Array<{ id: JsonRpcId; method: string; params: unknown; opts?: TransportRequestOptions }>;
 } {
   const sent: JsonRpcMessage[] = [];
-  const requests: Array<{ id: JsonRpcId; method: string; params: unknown }> = [];
+  const requests: Array<{ id: JsonRpcId; method: string; params: unknown; opts?: TransportRequestOptions }> = [];
   let onMsg: ((msg: JsonRpcMessage) => void | Promise<void>) | undefined;
   let nextReqId = 1;
   const pendingRequests = new Map<
     JsonRpcId,
-    { resolve: (val: unknown) => void; reject: (err: unknown) => void }
+    { resolve: (val: unknown) => void; reject: (err: unknown) => void; timer?: NodeJS.Timeout }
   >();
 
   const transport: Transport = {
@@ -94,15 +95,23 @@ function createMockTransport(opts: {
     send(msg) {
       sent.push(msg);
     },
-    async request(method, params) {
+    async request(method, params, reqOpts) {
       const id = nextReqId++;
-      requests.push({ id, method, params });
+      requests.push({ id, method, params, opts: reqOpts });
       sent.push({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
       if (opts.onRequest !== undefined) {
-        return await opts.onRequest(method, params, id);
+        return await opts.onRequest(method, params, id, reqOpts);
       }
       return new Promise((resolve, reject) => {
-        pendingRequests.set(id, { resolve, reject });
+        let timer: NodeJS.Timeout | undefined;
+        if (reqOpts?.timeoutMs !== undefined && reqOpts.timeoutMs > 0) {
+          timer = setTimeout(() => {
+            pendingRequests.delete(id);
+            reject(new Error(`request ${method} timed out after ${reqOpts.timeoutMs}ms`));
+          }, reqOpts.timeoutMs);
+          timer.unref?.();
+        }
+        pendingRequests.set(id, { resolve, reject, timer });
       });
     },
     close() {},
@@ -116,6 +125,9 @@ function createMockTransport(opts: {
       if (!("method" in msg) && "id" in msg && msg.id !== null && pendingRequests.has(msg.id)) {
         const pending = pendingRequests.get(msg.id)!;
         pendingRequests.delete(msg.id);
+        if (pending.timer !== undefined) {
+          clearTimeout(pending.timer);
+        }
         if ("error" in msg) {
           pending.reject(new Error(msg.error.message));
         } else {
@@ -477,6 +489,210 @@ test("Manager elicitation fallback: client WITHOUT elicitation capability gets E
     assert.equal(pullRes.result._meta?.code, "E_CONSENT");
     assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
     assert.match(pullRes.result.content[0]?.text ?? "", /^E_CONSENT: this tool needs user consent for: net:api\.example\.com/);
+  });
+});
+
+test("Manager elicitation: accept response without valid decision returns readable refusal with E_POLICY and isError: true", async () => {
+  await withHome(async (home, downloads) => {
+    const capsulePath = await packNetCapsule(home, "netcap_nodecision");
+
+    const mock = createMockTransport({
+      onRequest: (method, _params) => {
+        if (method === ELICITATION_METHOD) {
+          // Accept action, but content has no valid decision property
+          return {
+            action: "accept",
+            content: {},
+          };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      },
+    });
+
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    server.serve(mock.transport);
+
+    await mock.deliver(
+      rpc("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: {} },
+      }),
+    );
+    await server.drain();
+
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "capsule_install",
+        arguments: { path: capsulePath },
+      }),
+    );
+    await server.drain();
+
+    const installMsg = mock.sent.find(
+      (m) => "result" in m && (m.result as { structuredContent?: { name?: string } }).structuredContent?.name === "netcap_nodecision",
+    ) as { result: { structuredContent: { capsuleId: string } } };
+    const capsuleId = installMsg.result.structuredContent.capsuleId;
+
+    // Call netcap_nodecision__pull
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "netcap_nodecision__pull",
+        arguments: {},
+      }),
+    );
+    await server.drain();
+
+    const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: {
+        resultType?: string;
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string; grants?: string[] };
+      };
+    };
+    assert.ok(pullRes);
+    assert.equal(pullRes.result.resultType, "complete");
+    assert.equal(pullRes.result.isError, true);
+    assert.equal(pullRes.result._meta?.code, "E_POLICY");
+    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+    assert.equal(hasGrant(loadGrants(home), capsuleId, NET_GRANT), false);
+  });
+});
+
+test("Manager elicitation: accept response with invalid decision value returns readable refusal with E_POLICY", async () => {
+  await withHome(async (home, downloads) => {
+    const capsulePath = await packNetCapsule(home, "netcap_invaliddecision");
+
+    const mock = createMockTransport({
+      onRequest: (method, _params) => {
+        if (method === ELICITATION_METHOD) {
+          // Accept action, but content has invalid decision value
+          return {
+            action: "accept",
+            content: { [DECISION_PROPERTY]: "not-a-valid-choice" },
+          };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      },
+    });
+
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    server.serve(mock.transport);
+
+    await mock.deliver(
+      rpc("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: {} },
+      }),
+    );
+    await server.drain();
+
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "capsule_install",
+        arguments: { path: capsulePath },
+      }),
+    );
+    await server.drain();
+
+    // Call netcap_invaliddecision__pull
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "netcap_invaliddecision__pull",
+        arguments: {},
+      }),
+    );
+    await server.drain();
+
+    const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: {
+        resultType?: string;
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string };
+      };
+    };
+    assert.ok(pullRes);
+    assert.equal(pullRes.result.resultType, "complete");
+    assert.equal(pullRes.result.isError, true);
+    assert.equal(pullRes.result._meta?.code, "E_POLICY");
+    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+  });
+});
+
+test("Manager elicitation: transport request passes timeoutMs and unanswered elicitation frees queue for subsequent requests", async () => {
+  await withHome(async (home, downloads) => {
+    const capsulePath = await packNetCapsule(home, "netcap_timeout");
+    let passedTimeoutMs: number | undefined;
+
+    const mock = createMockTransport({
+      onRequest: (method, _params, _id, reqOpts) => {
+        if (method === ELICITATION_METHOD) {
+          passedTimeoutMs = reqOpts?.timeoutMs;
+          // Simulate timeout error
+          throw new Error(`request ${method} timed out after ${reqOpts?.timeoutMs}ms`);
+        }
+        throw new Error(`unexpected request: ${method}`);
+      },
+    });
+
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    server.serve(mock.transport);
+
+    await mock.deliver(
+      rpc("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: {} },
+      }),
+    );
+    await server.drain();
+
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "capsule_install",
+        arguments: { path: capsulePath },
+      }),
+    );
+    await server.drain();
+
+    // Call tool that requires consent
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "netcap_timeout__pull",
+        arguments: {},
+      }),
+    );
+    await server.drain();
+
+    // Verify explicit timeout was passed to transport.request
+    assert.equal(passedTimeoutMs, ELICITATION_TIMEOUT_MS);
+    assert.equal(passedTimeoutMs, 60_000);
+
+    // Verify tool call failed gracefully with E_POLICY
+    const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: {
+        resultType?: string;
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string };
+      };
+    };
+    assert.ok(pullRes);
+    assert.equal(pullRes.result.resultType, "complete");
+    assert.equal(pullRes.result.isError, true);
+    assert.equal(pullRes.result._meta?.code, "E_POLICY");
+    assert.match(pullRes.result.content[0]?.text ?? "", /E_POLICY: user denied net:api\.example\.com/);
+
+    // Verify subsequent request (tools/list) can run and drain settles without hanging
+    await mock.deliver(rpc("tools/list"));
+    await server.drain();
+
+    const listRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    assert.ok(listRes);
+    assert.ok(Array.isArray(listRes.result.tools));
+    assert.ok(listRes.result.tools.some((t) => t.name === "netcap_timeout__pull"));
   });
 });
 

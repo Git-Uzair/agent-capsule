@@ -46,6 +46,9 @@ import {
  */
 type VerifyFailure = "corrupt" | "unverifiable";
 
+/** How long to wait for a client to answer an elicitation before treating it as declined (60s). */
+export const ELICITATION_TIMEOUT_MS = 60_000;
+
 /** Where one advertised gateway name goes, and what that capsule is allowed to run. */
 type GatewayRoute = {
   loaded: LoadedCapsule;
@@ -331,7 +334,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       homeDir: opts.homeDir,
       warn,
       resultMeta: capsuleResultMeta(loaded.manifest),
-      legacySession: () => false,
+      legacySession: () => !clientElicitation,
     };
 
     const callParams = { ...(request ?? {}), name: route.innerName };
@@ -346,35 +349,20 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
 
       const transport = currentTransport ?? activeTransports.values().next().value;
 
-      if (!clientElicitation || transport === undefined) {
-        return {
-          resultType: "complete",
-          content: [
-            {
-              type: "text",
-              text:
-                `E_CONSENT: this tool needs user consent for: ${missingGrants.join(", ")}. ` +
-                `This MCP session uses a revision without the consent flow, so approval cannot be asked for here. ` +
-                `Ask the user to grant it once via the capsule UI (capsule ui ${sanitizeModelText(loaded.file, 200)}) ` +
-                `or a client speaking MCP 2026-07-28, then call this tool again.`,
-            },
-          ],
-          isError: true,
-          _meta: { code: "E_CONSENT", grants: missingGrants, ...ctx.resultMeta },
-        };
-      }
-
       const inputResponses: Record<string, unknown> = {};
       for (const [grant, req] of Object.entries(inputRequests ?? {})) {
         try {
-          const elicitRes = await transport.request(req.method, req.params);
+          const elicitRes =
+            transport !== undefined
+              ? await transport.request(req.method, req.params, { timeoutMs: ELICITATION_TIMEOUT_MS })
+              : { action: "decline" };
           inputResponses[grant] = elicitRes;
         } catch {
           inputResponses[grant] = { action: "decline" };
         }
       }
 
-      return await handleToolsCall(
+      const retryRes = await handleToolsCall(
         {
           ...callParams,
           requestState,
@@ -382,6 +370,25 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
         },
         ctx,
       );
+
+      if (retryRes["resultType"] === INPUT_REQUIRED) {
+        const remainingRequests = asRecord(retryRes["inputRequests"]);
+        const remaining = Object.keys(remainingRequests ?? {});
+        const list = remaining.length > 0 ? remaining.join(", ") : missingGrants.join(", ");
+        return {
+          resultType: "complete",
+          content: [
+            {
+              type: "text",
+              text: `E_POLICY: user denied ${list}`,
+            },
+          ],
+          isError: true,
+          _meta: { code: "E_POLICY", grants: remaining.length > 0 ? remaining : missingGrants, ...ctx.resultMeta },
+        };
+      }
+
+      return retryRes;
     }
 
     return initialRes;
