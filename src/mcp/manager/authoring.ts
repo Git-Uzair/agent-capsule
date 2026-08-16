@@ -10,6 +10,7 @@ import { capsuleHome } from "../../security/signing.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
 import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
 import {
+  AUTHORED_NAME_PATTERN,
   installLoadedCapsule,
   loadRefusal,
   screenManifest,
@@ -40,13 +41,6 @@ export function bumpPatchVersion(version: string): string {
   const patch = parseInt(match[3]!, 10) + 1;
   return `${major}.${minor}.${patch}`;
 }
-
-/**
- * The capsule name alphabet this tool accepts: the schema's `meta.name` pattern minus `.`, which is
- * also the gateway namespace alphabet. Checked here rather than left to `parseManifest`, because the
- * name becomes a directory under `workspaces/` before any manifest is parsed.
- */
-const AUTHORED_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export async function handleCapsuleCreate(
   rawArgs: unknown,
@@ -116,14 +110,17 @@ async function executeAuthoringPipeline(
     }
   }
 
-  // 1. Guardrail: Capsule Name validation
+  // 1. Guardrail: Capsule Name validation. The alphabet lives in `tools.ts`, beside the schema that
+  // describes it to the agent, so the rule and its description are one string. Checked here rather
+  // than left to `parseManifest`: the name becomes a directory under `workspaces/` before any
+  // manifest is parsed.
   if (!name) {
     throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "capsule_create requires 'name'");
   }
 
   if (!AUTHORED_NAME_PATTERN.test(name)) {
     const text =
-      `Invalid capsule name '${name}': must match ^[a-z0-9][a-z0-9_-]{0,63}$ ` +
+      `Invalid capsule name '${name}': must match ${AUTHORED_NAME_PATTERN.source} ` +
       `(lowercase alphanumeric, underscores, hyphens, 1-64 characters).`;
     return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
   }

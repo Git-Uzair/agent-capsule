@@ -31,6 +31,36 @@ import {
 export const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /**
+ * The capsule name alphabet the authoring tools accept: the schema's `meta.name` pattern minus `.`,
+ * which is also the gateway namespace alphabet. Narrower than `GATEWAY_NAME_PATTERN` on purpose — the
+ * name becomes a directory under `workspaces/` before any manifest is parsed, so `MyCapsule` and
+ * `Mycapsule` must not be two capsules on a case-insensitive filesystem. It lives here, beside the
+ * schemas that describe it, so `capsule_create`'s `name` description can be built from this very
+ * source string instead of from a copy of it that could drift.
+ */
+export const AUTHORED_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** What `capsule_create`'s and `capsule_update`'s `name` promises, in the rule's own words. */
+const AUTHORED_NAME_DESCRIPTION =
+  `Name of the capsule: must match ${AUTHORED_NAME_PATTERN.source} — lowercase a-z and 0-9, ` +
+  `underscore and hyphen, first character alphanumeric, 1-64 characters. Uppercase letters and dots ` +
+  `are refused. Its tools are served to the agent as '<name>__<toolName>'.`;
+
+/**
+ * Every trust state a listed capsule can be reported in: `LoadedCapsule["trust"]` plus the two ways an
+ * installed file can fail this host's own gates (src/mcp/manager/server.ts). `ListedCapsule["trust"]`
+ * is this list, so a new state in either place has to be added here before it can be assigned — which
+ * is what keeps `capsule_list`'s description from naming a state nothing produces.
+ */
+export const LISTED_TRUST_STATES = [
+  "pinned",
+  "ok",
+  "drift-accepted",
+  "corrupt",
+  "unverifiable",
+] as const satisfies readonly (LoadedCapsule["trust"] | "corrupt" | "unverifiable")[];
+
+/**
  * What a tool's `effects` list means, in the words a capsule author needs. Declaring an effect is not
  * paperwork about intent: `buildPolicy`'s check refuses any op missing from the list of the tool being
  * run (src/runtime/policy.ts), so a handler that calls `capsule.log` without `log.write` is created,
@@ -43,9 +73,10 @@ const EFFECTS_DESCRIPTION =
   "that call is refused when the tool runs ('tool <name> did not declare effect <op>'). The ops are " +
   "kv.get and kv.set (`capsule.kv.get` / `capsule.kv.set`), sql.query and sql.exec " +
   "(`capsule.sql.query` / `capsule.sql.exec`), net.fetch (`capsule.fetch`), log.write (`capsule.log`), " +
-  "and clock.now and random.bytes (`new Date()`, `Date.now()`, `Math.random()`). The kv, sql and net " +
-  "effects additionally require the matching capability; log.write, clock.now and random.bytes " +
-  "require none.";
+  "clock.now (`capsule.now()`, `new Date()`, `Date.now()`) and random.bytes (`capsule.random(n)`, " +
+  "`Math.random()`). The kv, sql and net effects additionally require the matching capability; " +
+  "log.write, clock.now and random.bytes require none. pack.write is a legal effect name too, but no " +
+  "guest API in this host performs it, so a tool has nothing to declare it for.";
 
 export const AUTHORING_TOOLS: readonly CatalogTool[] = [
   {
@@ -59,7 +90,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
       properties: {
         name: {
           type: "string",
-          description: "Name of the capsule ([a-zA-Z0-9_-], 1-64 characters). All exposed tools will be prefixed with '<name>__'.",
+          description: AUTHORED_NAME_DESCRIPTION,
         },
         title: {
           type: "string",
@@ -76,18 +107,20 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         source: {
           type: "string",
           description:
-            "Guest JavaScript source code evaluated in the QuickJS sandbox. Must define tool handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Sandboxed runtime APIs are available on `globalThis.capsule`: `capsule.fetch(url, init)` (when net capability is declared), `capsule.kv.get(key)` / `capsule.kv.set(key, val)` (when kv enabled), `capsule.sql.query(sql, params)` / `capsule.sql.exec(sql, params)` (when sql enabled), and `capsule.log(message)` (no capability required). Every op a handler calls must also be declared in that tool's `effects`, or that call is refused when the tool runs: `capsule.log` needs \"log.write\", `capsule.kv.get` / `capsule.kv.set` need \"kv.get\" / \"kv.set\", `capsule.sql.query` / `capsule.sql.exec` need \"sql.query\" / \"sql.exec\", `capsule.fetch` needs \"net.fetch\", and reading the clock or randomness (`new Date()`, `Date.now()`, `Math.random()`) needs \"clock.now\" / \"random.bytes\".",
+            "Guest JavaScript source code evaluated in the QuickJS sandbox. Must define tool handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Sandboxed runtime APIs are available on `globalThis.capsule`: `capsule.fetch(url, init)` (when net capability is declared), `capsule.kv.get(key)` / `capsule.kv.set(key, val)` (when kv enabled), `capsule.sql.query(sql, params)` / `capsule.sql.exec(sql, params)` (when sql enabled), and `capsule.log(message)`, `capsule.now()` (an ISO-8601 timestamp string) and `capsule.random(n)` (n random bytes as lowercase hex) (no capability required). Every op a handler calls must also be declared in that tool's `effects`, or that call is refused when the tool runs: `capsule.log` needs \"log.write\", `capsule.kv.get` / `capsule.kv.set` need \"kv.get\" / \"kv.set\", `capsule.sql.query` / `capsule.sql.exec` need \"sql.query\" / \"sql.exec\", `capsule.fetch` needs \"net.fetch\", and reading the clock or randomness (`capsule.now()`, `new Date()`, `Date.now()`, `capsule.random(n)`, `Math.random()`) needs \"clock.now\" / \"random.bytes\".",
         },
         tools: {
           type: "array",
-          description: "Array of tool definitions exposed to the LLM agent.",
+          description: "Array of tool definitions exposed to the LLM agent (1-64 tools).",
           items: {
             type: "object",
             required: ["name"],
             properties: {
               name: {
                 type: "string",
-                description: "Tool name ([a-zA-Z0-9_-], 1-64 characters). Exposed as '<capsuleName>__<toolName>'.",
+                description:
+                  "Tool name ([a-zA-Z0-9_-], 1-64 characters) that must not start with 'capsule_', which is " +
+                  "reserved for this host's built-in tools. Exposed as '<capsuleName>__<toolName>'.",
               },
               title: {
                 type: "string",
@@ -133,7 +166,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
                   type: "array",
                   items: { type: "string" },
                   description:
-                    "Hosts `capsule.fetch` may reach, as lowercase domain names. An entry is either an exact host (`api.example.com`), or a `*.`-prefixed pattern (`*.example.com`) matching any subdomain below it but not the apex `example.com`, which has to be listed on its own. Every host that no entry matches is blocked, and IP addresses and loopback are never reachable through this list. Put only the hosts the user named here; never add a host of your own choosing.",
+                    "Hosts `capsule.fetch` may reach, as lowercase domain names, at most 32 of them. An entry is either an exact host (`api.example.com`), or a `*.`-prefixed pattern (`*.example.com`) matching any subdomain below it but not the apex `example.com`, which has to be listed on its own. Every host that no entry matches is blocked, and IP addresses and loopback are never reachable through this list. Put only the hosts the user named here; never add a host of your own choosing.",
                 },
               },
             },
@@ -172,7 +205,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         name: {
           type: "string",
-          description: "Name of the capsule to update.",
+          description: `Name of the capsule to update. ${AUTHORED_NAME_DESCRIPTION}`,
         },
         title: {
           type: "string",
@@ -322,7 +355,15 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_list",
     title: "List Installed Capsules",
-    description: "List all installed Agent Capsules, their publisher keys, trust state (pinned, ok, drift, corrupt), declared capabilities, and exposed gateway tools ('<capsuleName>__<toolName>').",
+    description:
+      "List all installed Agent Capsules, their publisher keys, trust state, declared capabilities, and " +
+      "exposed gateway tools ('<capsuleName>__<toolName>'). Every listing re-verifies the installed file " +
+      "against the trust store, and the trust state is one of: 'pinned' (this load pinned the name's " +
+      "publisher key and tool catalog), 'ok' (key and tool catalog match the pin), 'drift-accepted' (a " +
+      "changed tool catalog the user re-pinned by passing accept_drift to capsule_install), 'corrupt' (the " +
+      "file failed signature, digest or trust verification — a tool catalog that drifted from its pin " +
+      "reads as corrupt until accept_drift re-pins it), or 'unverifiable' (the file no longer matches the " +
+      "capsuleId it is pinned under). A corrupt or unverifiable capsule serves no tools.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -709,7 +750,7 @@ export type ListedCapsule = {
   installedAt: string;
   publisherKey: string;
   /** `LoadedCapsule["trust"]`, or `corrupt`/`unverifiable` when the installed file failed its gates. */
-  trust: string;
+  trust: (typeof LISTED_TRUST_STATES)[number];
   capabilities: string;
   tools: string[];
   note?: string;

@@ -11,8 +11,6 @@ function usage(message: string): never {
   throw new CapsuleError("E_USAGE", `${message} (${USAGE})`);
 }
 
-export type McpbEntry = ZipEntry;
-
 export const MANAGER_DESCRIPTION =
   "Agent Capsule Manager — Gateway MCP server for running, creating, and managing secure Agent Capsules.\n\n" +
   "• Install Capsules: Use capsule_install to install .capsule files from a file path ({ path: \"...\" }) " +
@@ -67,7 +65,7 @@ export async function buildManagerMcpb(
     },
   };
 
-  const entries: McpbEntry[] = [
+  const entries: ZipEntry[] = [
     {
       path: "manifest.json",
       data: Buffer.from(JSON.stringify(manifestJson, null, 2) + "\n", "utf8"),

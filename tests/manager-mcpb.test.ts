@@ -5,9 +5,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fromBuffer, type Entry } from "yauzl";
+import SCHEMA from "../schema/capsule-0.1.schema.json" with { type: "json" };
 import { buildManagerMcpb, runBuildManagerMcpb } from "../src/commands/build-manager-mcpb.ts";
 import { getDefaultIconPath, getDistRuntimePaths } from "../src/core/paths.ts";
+import { installedCapsulePath } from "../src/mcp/manager/registry.ts";
 import { createManagerServer } from "../src/mcp/manager/server.ts";
+import { AUTHORED_NAME_PATTERN, LISTED_TRUST_STATES } from "../src/mcp/manager/tools.ts";
 import type { JsonRpcRequest } from "../src/mcp/transport.ts";
 import { HOST_VERSION } from "../src/version.ts";
 
@@ -239,6 +242,50 @@ describe("capsule build-manager-mcpb", () => {
       const createTool = tools.find((t) => t.name === "capsule_create")!;
       assert.ok(createTool.description.includes("brand-new Agent Capsule"));
       assert.ok(createTool.description.includes("conformance"));
+
+      // The name description must state the rule that is actually enforced, not a wider one: the
+      // served alphabet is AUTHORED_NAME_PATTERN (src/mcp/manager/tools.ts), so the description is
+      // built from its source and this assertion fails the moment the two disagree.
+      const createNameDesc = createTool.inputSchema?.properties?.["name"]?.description ?? "";
+      assert.ok(
+        createNameDesc.includes(AUTHORED_NAME_PATTERN.source),
+        `name description must quote the enforced pattern ${AUTHORED_NAME_PATTERN.source}: ${createNameDesc}`,
+      );
+      assert.ok(
+        !createNameDesc.includes("a-zA-Z0-9_-"),
+        "name description must not advertise the wider gateway alphabet the authoring tools refuse",
+      );
+      assert.match(createNameDesc, /lowercase/i, "name description must say the alphabet is lowercase");
+      assert.match(createNameDesc, /1-64 characters/, "name description must state the length limit");
+      assert.ok(
+        createNameDesc.includes("<name>__<toolName>"),
+        "name description must say tools are served as <name>__<toolName>",
+      );
+      // capsule_update takes the same name through the same check, so it says the same rule.
+      const updateNameDesc =
+        tools.find((t) => t.name === "capsule_update")!.inputSchema?.properties?.["name"]?.description ?? "";
+      assert.ok(updateNameDesc.includes(AUTHORED_NAME_PATTERN.source), "capsule_update name must state the same rule");
+
+      // A tool name is the schema's business (schema/capsule-0.1.schema.json), plus the reserved
+      // `capsule_` prefix parseManifest refuses; the description has to match both.
+      const toolNamePattern = SCHEMA.properties.tools.items.properties.name.pattern;
+      assert.equal(toolNamePattern, "^[a-zA-Z0-9_-]{1,64}$");
+      const createToolNameDesc =
+        createTool.inputSchema?.properties?.["tools"]?.items?.properties?.["name"]?.description ?? "";
+      assert.ok(createToolNameDesc.includes("[a-zA-Z0-9_-]"), "tool name description must state the schema alphabet");
+      assert.ok(createToolNameDesc.includes("1-64 characters"), "tool name description must state the schema length");
+      assert.ok(
+        createToolNameDesc.includes("capsule_"),
+        "tool name description must say the 'capsule_' prefix is reserved",
+      );
+
+      // The tools array bounds are the schema's minItems/maxItems, so the description must not invent
+      // its own numbers.
+      assert.equal(SCHEMA.properties.tools.minItems, 1);
+      assert.equal(SCHEMA.properties.tools.maxItems, 64);
+      const createToolsDesc = createTool.inputSchema?.properties?.["tools"]?.description ?? "";
+      assert.ok(createToolsDesc.includes("1-64 tools"), "tools description must state the 1-64 schema bounds");
+
       const createSourceDesc = createTool.inputSchema?.properties?.["source"]?.description ?? "";
       assert.ok(createSourceDesc.includes("QuickJS sandbox"), "source description must mention QuickJS sandbox");
       assert.ok(createSourceDesc.includes("globalThis.tools"), "source description must mention globalThis.tools");
@@ -249,6 +296,19 @@ describe("capsule build-manager-mcpb", () => {
       assert.ok(createSourceDesc.includes("capsule.sql.query"), "source description must cite capsule.sql.query");
       assert.ok(createSourceDesc.includes("capsule.sql.exec"), "source description must cite capsule.sql.exec");
       assert.ok(createSourceDesc.includes("capsule.log"), "source description must cite capsule.log");
+      // The `globalThis.capsule` enumeration is the whole frozen object the prelude installs
+      // (src/runtime/prelude.ts): now and random are on it too, and a schema that hides them sends the
+      // agent to `Date`/`Math` for things the capsule API already offers.
+      assert.ok(createSourceDesc.includes("capsule.now()"), "source description must cite capsule.now()");
+      assert.ok(createSourceDesc.includes("capsule.random(n)"), "source description must cite capsule.random(n)");
+      assert.ok(
+        createSourceDesc.includes("ISO-8601"),
+        "source description must say capsule.now() returns an ISO-8601 timestamp string, not a number",
+      );
+      assert.ok(
+        !createSourceDesc.includes("capsule.pack"),
+        "source description must not advertise a pack API the prelude does not install",
+      );
 
       // An advertised API is only callable once the tool declares the op it performs: policy.check
       // refuses any op missing from that tool's effects list (src/runtime/policy.ts), so a schema that
@@ -305,6 +365,9 @@ describe("capsule build-manager-mcpb", () => {
         /only the hosts the user/i,
         "allowed_hosts description must keep the guardrail about listing only hosts the user named",
       );
+      // The list has a ceiling, and it is the schema's (32), not one the description made up.
+      assert.equal(SCHEMA.properties.capabilities.properties.net.properties.allowed_hosts.maxItems, 32);
+      assert.ok(createHostsDesc.includes("32"), "allowed_hosts description must state the schema's 32-entry ceiling");
 
       // Verify capsule_update accurate guest ABI descriptions
       const updateTool = tools.find((t) => t.name === "capsule_update")!;
@@ -328,6 +391,27 @@ describe("capsule build-manager-mcpb", () => {
             `${tool.name} effects description must enumerate ${effect}`,
           );
         }
+        // The enumeration is measured against the schema's own effect enum: every name the schema
+        // accepts has to be accounted for, including pack.write — which the description accounts for
+        // by saying no guest API performs it (nothing in src/runtime supplies the packWrite port).
+        for (const effect of SCHEMA.properties.tools.items.properties.effects.items.enum) {
+          assert.ok(
+            effectsDesc.includes(effect),
+            `${tool.name} effects description must account for the schema effect ${effect}`,
+          );
+        }
+        assert.match(
+          effectsDesc,
+          /pack\.write[^.]*no guest API/,
+          `${tool.name} effects description must say pack.write has no guest API in this host`,
+        );
+        // clock.now and random.bytes reach the guest through capsule.now/capsule.random as well as the
+        // patched Date/Math (src/runtime/prelude.ts).
+        assert.ok(effectsDesc.includes("capsule.now()"), `${tool.name} effects description must cite capsule.now()`);
+        assert.ok(
+          effectsDesc.includes("capsule.random(n)"),
+          `${tool.name} effects description must cite capsule.random(n)`,
+        );
       }
 
       // Verify capsule_install, capsule_uninstall, capsule_list, capsule_test_tool descriptions
@@ -341,6 +425,18 @@ describe("capsule build-manager-mcpb", () => {
       const listTool = tools.find((t) => t.name === "capsule_list")!;
       assert.ok(listTool.description.includes("publisher keys"));
       assert.ok(listTool.description.includes("trust state"));
+      // Every state the listing can report, and only those: LISTED_TRUST_STATES is the type of
+      // ListedCapsule["trust"], so a state that cannot be assigned cannot be named here either.
+      for (const state of LISTED_TRUST_STATES) {
+        assert.ok(
+          listTool.description.includes(`'${state}'`),
+          `capsule_list description must name the trust state ${state}`,
+        );
+      }
+      assert.ok(
+        !/\bdrift\b(?!-)/.test(listTool.description),
+        "capsule_list description must not name a bare 'drift' state — the real spelling is drift-accepted",
+      );
 
       const testTool = tools.find((t) => t.name === "capsule_test_tool")!;
       assert.ok(testTool.description.includes("sandboxed test invocation"));
@@ -424,6 +520,120 @@ describe("capsule build-manager-mcpb", () => {
       const deniedResult = (denied as { result: { isError: boolean; content: Array<{ text: string }> } }).result;
       assert.equal(deniedResult.isError, true);
       assert.match(deniedResult.content[0]!.text, /did not declare effect log\.write/);
+    });
+  });
+
+  it("enforces the name rule and the trust states its schemas describe", async () => {
+    await withHome(async (home) => {
+      const warnings: string[] = [];
+      const options = {
+        homeDir: home,
+        downloadsDir: join(home, "downloads"),
+        warn: (line: string) => warnings.push(line),
+      };
+      const server = createManagerServer(options);
+      type Refusal = { isError: boolean; content: Array<{ text: string }>; structuredContent: { error?: string } };
+
+      // The names the description now calls illegal are the names AUTHORED_NAME_PATTERN refuses, and
+      // the refusal quotes that same pattern — the schema, the check and the message are one rule.
+      for (const name of ["MyCapsule", "_notes", "-notes", "a.b"]) {
+        assert.equal(AUTHORED_NAME_PATTERN.test(name), false, `${name} must not match the authored name rule`);
+        const res = await server.handleMessage(
+          toolCall("capsule_create", {
+            name,
+            source: "globalThis.tools = { peek() { return {}; } };",
+            tools: [{ name: "peek", inputSchema: { type: "object" } }],
+          }),
+        );
+        const refused = (res as { result: Refusal }).result;
+        assert.equal(refused.isError, true, `capsule_create accepted the illegal name '${name}'`);
+        assert.equal(refused.structuredContent.error, "E_CONTENT");
+        assert.ok(
+          refused.content[0]!.text.includes(AUTHORED_NAME_PATTERN.source),
+          `refusal for '${name}' must quote the rule the schema states: ${refused.content[0]!.text}`,
+        );
+      }
+
+      // The reserved prefix the tool-name description warns about is enforced by parseManifest.
+      const reserved = await server.handleMessage(
+        toolCall("capsule_create", {
+          name: "notes1",
+          source: "globalThis.tools = { capsule_peek() { return {}; } };",
+          tools: [{ name: "capsule_peek", inputSchema: { type: "object" } }],
+        }),
+      );
+      const reservedRes = (reserved as { result: Refusal }).result;
+      assert.equal(reservedRes.isError, true, "a tool named capsule_* must be refused");
+      assert.match(reservedRes.content[0]!.text, /reserved tool name: capsule_peek/);
+
+      // A name the rule allows goes through, and the clock and randomness APIs the schemas enumerate
+      // are the ones the prelude really installs: this handler calls both and declares both.
+      const created = await server.handleMessage(
+        toolCall("capsule_create", {
+          name: "notes1",
+          title: "Notes",
+          description: "Reads the clock and some randomness.",
+          source:
+            "globalThis.tools = { peek() { return { at: capsule.now(), hex: capsule.random(4) }; } };",
+          tools: [
+            {
+              name: "peek",
+              title: "Peek",
+              description: "Returns the sandboxed clock reading and four random bytes.",
+              inputSchema: { type: "object" },
+              effects: ["clock.now", "random.bytes"],
+            },
+          ],
+        }),
+      );
+      const createdRes = (created as {
+        result: { isError: boolean; content: Array<{ text: string }>; structuredContent: { capsuleId: string } };
+      }).result;
+      assert.equal(createdRes.isError, false, `capsule_create failed: ${createdRes.content[0]?.text}`);
+      const capsuleId = createdRes.structuredContent.capsuleId;
+
+      const peeked = await server.handleMessage(toolCall("notes1__peek", {}));
+      const peekedRes = (peeked as {
+        result: { isError: boolean; content: Array<{ text: string }>; structuredContent: { at: string; hex: string } };
+      }).result;
+      assert.equal(peekedRes.isError, false, `notes1__peek failed: ${peekedRes.content[0]?.text}`);
+      assert.match(
+        peekedRes.structuredContent.at,
+        /^\d{4}-\d{2}-\d{2}T/,
+        "capsule.now() returns the ISO-8601 timestamp string the source description promises",
+      );
+      assert.match(
+        peekedRes.structuredContent.hex,
+        /^[0-9a-f]{8}$/,
+        "capsule.random(4) returns four bytes as lowercase hex, as the source description promises",
+      );
+
+      // What capsule_list reports has to be a state its description names.
+      type ListResult = { structuredContent: { capsules: Array<{ trust: string; tools: string[] }> } };
+      const listed = ((await server.handleMessage(toolCall("capsule_list", {}))) as { result: ListResult }).result;
+      const row = listed.structuredContent.capsules[0]!;
+      assert.ok(
+        (LISTED_TRUST_STATES as readonly string[]).includes(row.trust),
+        `capsule_list reported an undescribed trust state: ${row.trust}`,
+      );
+      assert.ok(row.tools.includes("notes1__peek"), `capsule_list did not report notes1__peek: ${row.tools.join(", ")}`);
+
+      // And the state a broken installed file lands in is 'corrupt', which the description names as
+      // the state a drifted or unverifiable-signature file reads as — not the absent 'drift'.
+      writeFileSync(installedCapsulePath(capsuleId, home), Buffer.from("not a capsule"));
+      const reopened = createManagerServer(options);
+      const relisted = ((await reopened.handleMessage(toolCall("capsule_list", {}))) as { result: ListResult }).result;
+      const brokenRow = relisted.structuredContent.capsules[0]!;
+      assert.equal(brokenRow.trust, "corrupt");
+      assert.ok(
+        (LISTED_TRUST_STATES as readonly string[]).includes(brokenRow.trust),
+        "corrupt must be one of the states capsule_list describes",
+      );
+      assert.deepEqual(brokenRow.tools, [], "a corrupt capsule serves no tools, as the description says");
+      assert.ok(
+        warnings.some((line) => line.includes(`Failed to verify installed capsule ${capsuleId}`)),
+        `the corrupt listing must report why the file was refused: ${warnings.join(" | ")}`,
+      );
     });
   });
 
