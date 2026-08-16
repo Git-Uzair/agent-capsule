@@ -2,6 +2,7 @@ node_modules/
 dist/
 .tmp/
 *.capsule
+*.mcpb
 *.sqlite
 *.sqlite-*
 traces/

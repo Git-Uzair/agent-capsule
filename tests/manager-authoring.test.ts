@@ -1156,3 +1156,87 @@ test("Manager Authoring Guardrails: capsule_update refuses a capsuleId and name 
     );
   });
 });
+
+test("Manager Authoring: a capsule created with ui_html serves its UI through gateway resources", async () => {
+  await withHome(async (home, downloads) => {
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    const uiHtml =
+      "<!DOCTYPE html><html><head><title>Notes</title></head>" +
+      "<body><div id=\"app\">UI ALIVE</div></body></html>";
+
+    const createRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_create",
+        arguments: {
+          name: "uidemo",
+          title: "UI Demo",
+          description: "Serves a UI.",
+          source: `globalThis.tools = { ping() { return { pong: true }; } };`,
+          tools: [
+            {
+              name: "ping",
+              title: "Ping",
+              description: "Answers pong.",
+              inputSchema: { type: "object", properties: {} },
+            },
+          ],
+          ui_html: uiHtml,
+        },
+      }),
+    );
+    assert.ok(createRes && "result" in createRes);
+    const created = createRes.result as { isError: boolean; structuredContent: { message: string } };
+    assert.equal(created.isError, false, created.structuredContent.message);
+
+    // The gateway tool carries the ui pointer the client renders from…
+    const listRes = await server.handleMessage(rpc("tools/list"));
+    assert.ok(listRes && "result" in listRes);
+    const tools = (listRes.result as { tools: { name: string; _meta?: { ui: { resourceUri: string } } }[] })
+      .tools;
+    const ping = tools.find((tool) => tool.name === "uidemo__ping");
+    assert.ok(ping, "gateway serves uidemo__ping");
+    assert.deepEqual(ping._meta, { ui: { resourceUri: "ui://uidemo" } });
+
+    // …resources/list declares that URI…
+    const resourcesRes = await server.handleMessage(rpc("resources/list"));
+    assert.ok(resourcesRes && "result" in resourcesRes);
+    const resources = (resourcesRes.result as { resources: { uri: string; mimeType: string }[] }).resources;
+    assert.deepEqual(resources, [
+      { uri: "ui://uidemo", name: "App UI", mimeType: "text/html;profile=mcp-app" },
+    ]);
+
+    // …and resources/read serves the exact HTML that was authored, with the CSP metadata the
+    // MCP Apps client applies to the frame. This is the read Claude Desktop makes to paint the
+    // widget — the one the gateway used to refuse with "no resources declared by manager".
+    const readRes = await server.handleMessage(rpc("resources/read", { uri: "ui://uidemo" }));
+    assert.ok(readRes && "result" in readRes);
+    const contents = (readRes.result as { contents: Record<string, unknown>[] }).contents;
+    assert.equal(contents.length, 1);
+    assert.equal(contents[0]?.["uri"], "ui://uidemo");
+    assert.equal(contents[0]?.["mimeType"], "text/html;profile=mcp-app");
+    assert.equal(contents[0]?.["text"], uiHtml);
+    assert.deepEqual(contents[0]?.["_meta"], {
+      ui: {
+        csp: { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] },
+        prefersBorder: false,
+      },
+    });
+
+    // A URI nobody declared is a protocol error, exactly as on the direct server.
+    const unknownRes = await server.handleMessage(rpc("resources/read", { uri: "ui://nobody" }));
+    assert.ok(unknownRes && "error" in unknownRes);
+    assert.equal(unknownRes.error.code, JSON_RPC_ERROR.InvalidParams);
+
+    // Uninstalling the capsule withdraws its resources with its tools.
+    const removeRes = await server.handleMessage(
+      rpc("tools/call", { name: "capsule_uninstall", arguments: { name: "uidemo" } }),
+    );
+    assert.ok(removeRes && "result" in removeRes);
+    const emptyRes = await server.handleMessage(rpc("resources/list"));
+    assert.ok(emptyRes && "result" in emptyRes);
+    assert.deepEqual((emptyRes.result as { resources: unknown[] }).resources, []);
+    const goneRes = await server.handleMessage(rpc("resources/read", { uri: "ui://uidemo" }));
+    assert.ok(goneRes && "error" in goneRes);
+    assert.equal(goneRes.error.code, JSON_RPC_ERROR.InvalidParams);
+  });
+});

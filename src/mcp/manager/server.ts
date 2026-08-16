@@ -3,11 +3,14 @@ import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
 import { homeSidecarPaths } from "../../runtime/invoke.ts";
 import { HOST_VERSION } from "../../version.ts";
+import { UI_EXTENSION, UI_MIME_TYPE } from "../apps.ts";
 import { BUILTIN_TOOLS } from "../builtin.ts";
 import { handleToolsCall, policyRefusal, type McpServerContext } from "../call.ts";
 import {
   assertNoToolNameCollision,
   buildToolList,
+  listResources,
+  type CatalogResource,
   type CatalogTool,
 } from "../catalog.ts";
 import { INPUT_REQUIRED } from "../mrtr.ts";
@@ -18,6 +21,8 @@ import {
   createRpcDispatcher,
   declaredCapabilities,
   MCP_PROTOCOL_VERSION,
+  negotiateProtocolVersion,
+  readCapsuleResourceContents,
   SERVER_INFO_META,
   SUPPORTED_PROTOCOL_VERSIONS,
   type McpServer,
@@ -63,13 +68,17 @@ type GatewayRoute = {
 
 /**
  * One snapshot of the installed set: the tools the merged catalog advertises, the routes a
- * `tools/call` may reach, and the rows `capsule_list` reports. They are built together on purpose —
- * three separate derivations of "what does this capsule serve" is exactly how an advertised tool
- * became callable while `capsule_list` denied it existed.
+ * `tools/call` may reach, the resources `resources/list` declares (with which capsule serves each
+ * URI), and the rows `capsule_list` reports. They are built together on purpose — separate
+ * derivations of "what does this capsule serve" is exactly how an advertised tool became callable
+ * while `capsule_list` denied it existed, and how a tool's `_meta.ui.resourceUri` once pointed at a
+ * URI `resources/read` refused to serve.
  */
 type Gateway = {
   tools: CatalogTool[];
   routes: Map<string, GatewayRoute>;
+  resources: CatalogResource[];
+  resourceOwners: Map<string, LoadedCapsule>;
   capsules: ListedCapsule[];
 };
 
@@ -116,19 +125,34 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     "capsule_install to install a capsule, capsule_list to see installed capsules, and capsule_uninstall to remove a capsule. " +
     "Installed capsules expose their tools under <capsuleName>__<toolName>.";
 
+  /**
+   * One answer for `initialize` and `server/discover`. Both lists really do change — the registry
+   * changes under a running session — and the ui extension is advertised unconditionally because it
+   * names an ability of the gateway, not of any one capsule: whether a UI-bearing capsule is
+   * installed right now is the resource list's answer, not the capability's.
+   */
+  const gatewayCapabilities = (): Record<string, unknown> => ({
+    tools: { listChanged: true },
+    resources: { listChanged: true },
+    extensions: { [UI_EXTENSION]: { mimeTypes: [UI_MIME_TYPE] } },
+  });
+
   function invalidateCache(): void {
     loadedCapsuleCache.clear();
   }
 
   function notifyListChanged(): void {
+    // Both lists change together: a registry change swaps tools and the resources their
+    // `_meta.ui.resourceUri` points at, so a client told only about the tools would render a stale
+    // UI against the new catalog.
+    const methods = ["notifications/tools/list_changed", "notifications/resources/list_changed"];
     for (const transport of activeTransports) {
-      try {
-        transport.send({
-          jsonrpc: "2.0",
-          method: "notifications/tools/list_changed",
-        });
-      } catch (e) {
-        warn(`Failed to send tools/list_changed notification: ${String(e)}`);
+      for (const method of methods) {
+        try {
+          transport.send({ jsonrpc: "2.0", method });
+        } catch (e) {
+          warn(`Failed to send ${method.slice("notifications/".length)} notification: ${String(e)}`);
+        }
       }
     }
   }
@@ -177,6 +201,8 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
   async function buildGateway(): Promise<Gateway> {
     const tools: CatalogTool[] = [...MANAGER_TOOLS];
     const routes = new Map<string, GatewayRoute>();
+    const resources: CatalogResource[] = [];
+    const resourceOwners = new Map<string, LoadedCapsule>();
     const capsules: ListedCapsule[] = [];
     // The manager's own names are part of the merged namespace, so a capsule can never shadow them.
     const seen = new Map<string, string>(
@@ -271,9 +297,26 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
         routes.set(name, { loaded, innerName: tool.name, served: servedNames });
         row.tools.push(name);
       }
+
+      // A capsule's resources ride with its tools: everything above that suppressed the capsule
+      // suppressed these too — a UI whose tools are not callable has nothing to render — and the
+      // first installed capsule wins a URI collision, the same precedence its tools got. This is
+      // what makes every served tool's `_meta.ui.resourceUri` a URI `resources/read` will serve.
+      for (const resource of listResources(loaded.manifest)) {
+        const owner = resourceOwners.get(resource.uri);
+        if (owner === undefined) {
+          resourceOwners.set(resource.uri, loaded);
+          resources.push(resource);
+        } else if (owner.capsuleId !== loaded.capsuleId) {
+          warn(
+            `Resource uri collision: '${resource.uri}' of capsule '${row.name}' is already served ` +
+              `by an earlier install; serving the earlier one.`,
+          );
+        }
+      }
     }
 
-    return { tools, routes, capsules };
+    return { tools, routes, resources, resourceOwners, capsules };
   }
 
   /** What the gateway actually serves for one capsuleId — the summary `capsule_install` reads back. */
@@ -507,21 +550,14 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       "initialize",
       (params) => {
         const p = asRecord(params);
-        const requested = p?.["protocolVersion"];
-        negotiatedVersion =
-          typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-            ? requested
-            : MCP_PROTOCOL_VERSION;
+        negotiatedVersion = negotiateProtocolVersion(p?.["protocolVersion"]);
         const capabilities = asRecord(p?.["capabilities"]);
         clientElicitation =
           capabilities?.["elicitation"] !== undefined && capabilities?.["elicitation"] !== null;
         return result({
           protocolVersion: negotiatedVersion,
           serverInfo,
-          capabilities: {
-            tools: { listChanged: true },
-            resources: { listChanged: false },
-          },
+          capabilities: gatewayCapabilities(),
           instructions: instructions(),
         });
       },
@@ -533,10 +569,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
           spec: MCP_PROTOCOL_VERSION,
           supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
           server: serverInfo,
-          capabilities: {
-            tools: { listChanged: true },
-            resources: { listChanged: false },
-          },
+          capabilities: gatewayCapabilities(),
           instructions: instructions(),
           ttlMs: CATALOG_TTL_MS,
           cacheScope: "public",
@@ -544,11 +577,30 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
     ],
     ["tools/list", async () => result({ tools: (await buildGateway()).tools, ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
     ["tools/call", handleToolsCallGateway],
-    ["resources/list", () => result({ resources: [], ttlMs: CATALOG_TTL_MS, cacheScope: "public" })],
+    [
+      "resources/list",
+      async () =>
+        result({ resources: (await buildGateway()).resources, ttlMs: CATALOG_TTL_MS, cacheScope: "public" }),
+    ],
     [
       "resources/read",
-      () => {
-        throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "no resources declared by manager");
+      async (params) => {
+        const uri = asRecord(params)?.["uri"];
+        if (typeof uri !== "string") {
+          throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "resources/read needs a string uri");
+        }
+        const owner = (await buildGateway()).resourceOwners.get(uri);
+        const contents = owner === undefined ? undefined : await readCapsuleResourceContents(owner, uri);
+        if (contents === undefined) {
+          throw new RpcFailure(
+            JSON_RPC_ERROR.InvalidParams,
+            `unknown resource: ${sanitizeModelText(uri, 200)}`,
+          );
+        }
+        // The catalog TTL, not the content TTL the direct server uses: a capsule's bytes are
+        // immutable, but which capsule owns a URI changes with the registry — `ui://<name>` serves
+        // new HTML the moment an update installs — so this answer is only as durable as the catalog.
+        return result({ contents: [contents], ttlMs: CATALOG_TTL_MS, cacheScope: "public" });
       },
     ],
     ["ping", () => result({})],

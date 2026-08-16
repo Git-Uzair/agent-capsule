@@ -135,9 +135,21 @@ test("Manager server: handshake, discover, ping, and initial tools/list", async 
     assert.deepEqual(initResult["serverInfo"], { name: "Capsule Manager", version: "0.1.0" });
     assert.deepEqual(initResult["capabilities"], {
       tools: { listChanged: true },
-      resources: { listChanged: false },
+      resources: { listChanged: true },
+      extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } },
     });
     assert.ok(typeof initResult["instructions"] === "string");
+
+    // Claude Desktop's extension host handshakes with 2025-11-25 and hangs up on any newer reply,
+    // so the gateway must echo it — this is the handshake that connects the installed .mcpb.
+    const legacyRes = await server.handleMessage(rpc("initialize", { protocolVersion: "2025-11-25" }));
+    assert.ok(legacyRes && "result" in legacyRes);
+    assert.equal((legacyRes.result as Record<string, unknown>)["protocolVersion"], "2025-11-25");
+
+    // An unknown revision settles on the newest supported one below it, never on a newer one.
+    const unknownRes = await server.handleMessage(rpc("initialize", { protocolVersion: "2026-01-01" }));
+    assert.ok(unknownRes && "result" in unknownRes);
+    assert.equal((unknownRes.result as Record<string, unknown>)["protocolVersion"], "2025-11-25");
 
     // Test server/discover
     const discRes = await server.handleMessage(rpc("server/discover"));
@@ -956,8 +968,9 @@ test("CLI command: capsule manager answers on stdio", async () => {
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as { id?: number; method?: string; result?: Record<string, unknown> });
 
-    // Expect 4 messages: response 1, response 2, notification list_changed, response 3
-    assert.equal(messages.length, 4);
+    // Expect 5 messages: response 1, response 2, both list_changed notifications (an install
+    // changes the tool list and the resource list together), response 3
+    assert.equal(messages.length, 5);
 
     const res1 = messages.find((m) => m.id === 1);
     assert.ok(res1);
@@ -969,6 +982,10 @@ test("CLI command: capsule manager answers on stdio", async () => {
 
     const notification = messages.find((m) => m.method === "notifications/tools/list_changed");
     assert.ok(notification);
+    const resourceNotification = messages.find(
+      (m) => m.method === "notifications/resources/list_changed",
+    );
+    assert.ok(resourceNotification);
 
     const res3 = messages.find((m) => m.id === 3);
     assert.ok(res3);

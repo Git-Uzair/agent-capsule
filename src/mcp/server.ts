@@ -23,17 +23,38 @@ export const MCP_PROTOCOL_VERSION = "2026-07-28";
 
 /**
  * Every revision `initialize` may settle on, newest first. The pre-2026 entries exist because real
- * clients lag the specification — Claude Desktop 1.x requests `2025-06-18` and disconnects when the
- * reply names a revision it does not know. Every method this server answers is shape-compatible with
- * these revisions except the MRTR consent flow, which they cannot carry; `tools/call` degrades that
- * one case to a readable `E_CONSENT` result instead (see `handleToolsCall`).
+ * clients lag the specification — Claude Desktop 1.x handshakes with the newest pre-`2026-07-28`
+ * revision it knows (`2025-11-25` in its extension host as of 1.28929) and disconnects when the
+ * reply names a revision outside its own list. Every method this server answers is shape-compatible
+ * with these revisions except the MRTR consent flow, which they cannot carry; `tools/call` degrades
+ * that one case to a readable `E_CONSENT` result instead (see `handleToolsCall`).
  */
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly string[] = [
   MCP_PROTOCOL_VERSION,
+  "2025-11-25",
   "2025-06-18",
   "2025-03-26",
   "2024-11-05",
 ];
+
+/**
+ * The revision `initialize` settles on for a request. A supported revision is echoed back. An
+ * unknown one is answered with the newest supported revision no newer than it — revisions are ISO
+ * dates, so `<=` orders them — because the requester demonstrably lives at that date: Claude
+ * Desktop's extension handshake asks with the newest pre-`2026-07-28` revision it knows and hangs
+ * up on any reply newer than its request, so answering the native revision to a request this list
+ * merely lags behind would refuse exactly the legacy clients the list exists for. A request older
+ * than every entry gets the oldest entry, the nearest this server can serve. No request at all
+ * stays native: the stateless profile lets a `2026-07-28` client skip `initialize` entirely, so
+ * absence reads as native, not legacy. Disconnecting on a reply it cannot use is the client's call.
+ */
+export function negotiateProtocolVersion(requested: unknown): string {
+  if (typeof requested !== "string") {
+    return MCP_PROTOCOL_VERSION;
+  }
+  const nearest = SUPPORTED_PROTOCOL_VERSIONS.find((version) => version <= requested);
+  return nearest ?? (SUPPORTED_PROTOCOL_VERSIONS[SUPPORTED_PROTOCOL_VERSIONS.length - 1] as string);
+}
 /** The capsule specification the container itself conforms to. */
 export const CAPSULE_SPEC = "agentcapsule.org/0.1";
 
@@ -41,6 +62,35 @@ export const CAPSULE_SPEC = "agentcapsule.org/0.1";
 export const CATALOG_TTL_MS = 3_600_000;
 /** Capsule content is immutable by construction — the statement digest covers it — so one day. */
 const CONTENT_TTL_MS = 86_400_000;
+
+/**
+ * The contents entry `resources/read` serves for one URI of one capsule: the UI app when the URI is
+ * its `resourceUri`, a declared resource when the URI matches one, `undefined` otherwise. Shared
+ * with the manager gateway so a capsule's UI reads byte-identically through either server — and so
+ * only declared paths are readable either way, since every byte served here is covered by the
+ * signed statement digest.
+ */
+export async function readCapsuleResourceContents(
+  capsule: LoadedCapsule,
+  uri: string,
+): Promise<Record<string, unknown> | undefined> {
+  const manifest = capsule.manifest;
+  if (manifest.ui?.app !== undefined && uri === manifest.ui.app.resourceUri) {
+    return await readUiResource(capsule);
+  }
+  const resource = manifest.resources.find((candidate) => candidate.uri === uri);
+  if (resource === undefined) {
+    return undefined;
+  }
+  const bytes = await capsule.reader.read(resource.path);
+  return {
+    uri: resource.uri,
+    mimeType: resource.mimeType,
+    ...(isTextMimeType(resource.mimeType)
+      ? { text: bytes.toString("utf8") }
+      : { blob: bytes.toString("base64") }),
+  };
+}
 
 /** The `_meta` key every result stamps this server's identity into. */
 export const SERVER_INFO_META = "io.modelcontextprotocol/serverInfo";
@@ -214,48 +264,18 @@ export function createMcpServer(opts: McpServerOptions): McpServer {
     if (typeof uri !== "string") {
       throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, "resources/read needs a string uri");
     }
-    if (manifest.ui?.app !== undefined && uri === manifest.ui.app.resourceUri) {
-      const uiContent = await readUiResource(capsule);
-      return result({
-        contents: [uiContent],
-        ttlMs: CONTENT_TTL_MS,
-        cacheScope: "public",
-      });
-    }
-    // Only what the manifest declares is readable, so every byte returned is covered by the signed
-    // statement digest. A container path that no resource points at is simply not a resource.
-    const resource = manifest.resources.find((candidate) => candidate.uri === uri);
-    if (resource === undefined) {
+    const contents = await readCapsuleResourceContents(capsule, uri);
+    if (contents === undefined) {
       throw new RpcFailure(JSON_RPC_ERROR.InvalidParams, `unknown resource: ${sanitizeModelText(uri, 200)}`);
     }
-    const bytes = await capsule.reader.read(resource.path);
-    return result({
-      contents: [
-        {
-          uri: resource.uri,
-          mimeType: resource.mimeType,
-          ...(isTextMimeType(resource.mimeType)
-            ? { text: bytes.toString("utf8") }
-            : { blob: bytes.toString("base64") }),
-        },
-      ],
-      ttlMs: CONTENT_TTL_MS,
-      cacheScope: "public",
-    });
+    return result({ contents: [contents], ttlMs: CONTENT_TTL_MS, cacheScope: "public" });
   }
 
   const handlers = new Map<string, RpcHandler>([
     [
       "initialize",
       (params) => {
-        // Version negotiation as the specification orders it: a requested revision the server can
-        // serve is echoed back; anything else — including no request at all — is answered with the
-        // native revision, and disconnecting is then the client's call.
-        const requested = asRecord(params)?.["protocolVersion"];
-        negotiatedVersion =
-          typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
-            ? requested
-            : MCP_PROTOCOL_VERSION;
+        negotiatedVersion = negotiateProtocolVersion(asRecord(params)?.["protocolVersion"]);
         // `instructions` rides along for every revision: a legacy client never calls
         // `server/discover`, so this is the only place it can learn what the capsule may do.
         return result({

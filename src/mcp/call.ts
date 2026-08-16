@@ -176,10 +176,15 @@ export async function handleToolsCall(
       }
       throw err;
     }
+    // `structuredContent` only when the value is a JSON object: that is its type in the
+    // specification, and a client that validates the envelope (Claude Desktop does) rejects the
+    // whole result over a mis-shaped mirror — the model then reads a generic failure for a call
+    // that succeeded. The text block above carries the value either way.
+    const builtinStructured = asRecord(res);
     return {
       resultType: "complete",
       content: [textContent(JSON.stringify(res))],
-      structuredContent: res,
+      ...(builtinStructured === undefined ? {} : { structuredContent: builtinStructured }),
       isError: false,
       _meta: { ...ctx.resultMeta },
     };
@@ -296,10 +301,14 @@ export async function handleToolsCall(
   if (res.ok) {
     // The value is already sanitised and capped by the run itself, so it is served as it stands: the
     // structured value for a client that can read it, and its serialisation for one that cannot.
+    // `structuredContent` is included only when the value is a JSON object — its type in the
+    // specification — because a client that validates the envelope rejects the whole result over a
+    // bare array or scalar there, turning a run that succeeded into a generic client-side failure.
+    const structured = asRecord(res.value);
     return {
       resultType: "complete",
       content: [textContent(typeof res.value === "string" ? res.value : JSON.stringify(res.value))],
-      structuredContent: res.value,
+      ...(structured === undefined ? {} : { structuredContent: structured }),
       isError: false,
       // The server's own metadata is written last, so a run can never displace the identity of the
       // server that produced it.

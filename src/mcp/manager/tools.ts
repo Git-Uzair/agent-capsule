@@ -87,6 +87,32 @@ const EFFECTS_DESCRIPTION =
   "log.write, clock.now and random.bytes require none. pack.write is a legal effect name too, but no " +
   "guest API in this host performs it, so a tool has nothing to declare it for.";
 
+/**
+ * What `ui_html` really is, taught in the schema because the agent authoring a capsule writes this
+ * document blind: the contract below is the MCP Apps wire protocol as Claude Desktop actually speaks
+ * it, extracted from a rendering client — an app that skips the size report, or waits on a bridge
+ * global that does not exist, renders as nothing and reads as "the UI is broken".
+ */
+const UI_HTML_DESCRIPTION =
+  "Optional interactive UI bundled with the capsule, rendered by MCP-Apps-capable clients (e.g. " +
+  "Claude Desktop) in a sandboxed iframe whenever one of this capsule's tools is called. Provide a " +
+  "COMPLETE HTML document (<!DOCTYPE html><html>…</html>) with all CSS/JS inline and a transparent " +
+  "page background. The host speaks JSON-RPC 2.0 over postMessage; there is no host global like " +
+  "window.capsule or window.host. Boot handshake: send " +
+  "window.parent.postMessage({jsonrpc:'2.0',id:0,method:'ui/initialize',params:{appInfo:{name,version}," +
+  "appCapabilities:{},protocolVersion:'2025-11-21'}},'*'); when the response with that id arrives, " +
+  "post the notification {jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}}. The " +
+  "triggering tool's result then arrives as the notification 'ui/notifications/tool-result' with " +
+  "params={content,structuredContent,isError}: prefer structuredContent but fall back to parsing " +
+  "content[0].text — some clients strip structured payloads. REQUIRED: report rendered height via " +
+  "{jsonrpc:'2.0',method:'ui/notifications/size-changed',params:{height,width}} after every render, " +
+  "from a ResizeObserver, and on a timer fallback shortly after boot — a frame that never reports a " +
+  "size is given no height and stays invisible. The UI may call this capsule's tools by posting " +
+  "{jsonrpc:'2.0',id,method:'tools/call',params:{name,arguments}} to window.parent and matching the " +
+  "response by id; through this gateway a tool's name is '<capsuleName>__<toolName>' (a direct " +
+  "`capsule mcp` server serves the bare name, so try the prefixed name and retry bare on an " +
+  "'unknown tool' error).";
+
 export const AUTHORING_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_create",
@@ -183,7 +209,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         ui_html: {
           type: "string",
-          description: "Optional HTML/JS UI content to bundle with the capsule.",
+          description: UI_HTML_DESCRIPTION,
         },
         allow_suspicious: {
           type: "boolean",
@@ -263,7 +289,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         ui_html: {
           type: "string",
-          description: "Updated HTML/JS UI content.",
+          description: `Updated UI content. ${UI_HTML_DESCRIPTION}`,
         },
         allow_suspicious: {
           type: "boolean",

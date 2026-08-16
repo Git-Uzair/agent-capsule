@@ -37,7 +37,8 @@ export const BUILTIN_TOOLS: ManifestTool[] = [
   {
     name: "capsule_runs",
     title: "Capsule Runs",
-    description: "Query recent execution runs from the journal sidecar, newest first.",
+    description:
+      "Query recent execution runs from the journal sidecar. Returns { runs: [...] }, newest first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -112,12 +113,16 @@ export async function handleBuiltinCall(
       const limit = typeof args["limit"] === "number" ? args["limit"] : 10;
       const paths = sidecarPaths(ctx.capsule.file);
       const journalPath = ctx.journalPath ?? paths.journal;
+      // Wrapped in an object on purpose: a tool result's `structuredContent` is a JSON *object* in
+      // every MCP revision this host speaks, and Claude Desktop validates that — it rejected the
+      // whole envelope over a bare array here, so a call that succeeded read as "Tool execution
+      // failed" to the model. The empty case wraps too, or the shape would depend on the count.
       if (!existsSync(journalPath)) {
-        return [];
+        return { runs: [] };
       }
       const journal = openSidecar("journal", () => openJournal(journalPath));
       try {
-        return journal.recentRuns({ capsuleId: ctx.capsule.capsuleId, limit });
+        return { runs: journal.recentRuns({ capsuleId: ctx.capsule.capsuleId, limit }) };
       } finally {
         journal.close();
       }

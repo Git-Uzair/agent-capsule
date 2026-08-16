@@ -228,12 +228,27 @@ test("initialize negotiates a supported legacy revision and answers native other
       assert.match(String(echoed["instructions"]), /sandboxed; its declared capabilities are kv/);
     }
 
-    // A revision this server has never heard of is answered with the native one — "respond with the
+    // A revision this server has never heard of is answered with the newest supported revision no
+    // newer than the request: the requester lives at that date, and a reply from its future is a
+    // reply it hangs up on — Claude Desktop's extension handshake did exactly that when its
+    // `2025-11-25` was answered with `2026-07-28`.
+    const between = await callOk(createMcpServer({ capsule }), "initialize", {
+      protocolVersion: "2026-01-01",
+    });
+    assert.equal(between["protocolVersion"], "2025-11-25");
+
+    // A revision from this server's future is answered with the native one — "respond with the
     // latest version the server supports" — and disconnecting is then the client's decision.
-    const unknown = await callOk(createMcpServer({ capsule }), "initialize", {
+    const future = await callOk(createMcpServer({ capsule }), "initialize", {
+      protocolVersion: "2099-01-01",
+    });
+    assert.equal(future["protocolVersion"], MCP_PROTOCOL_VERSION);
+
+    // A revision older than everything supported gets the oldest entry, the nearest one servable.
+    const ancient = await callOk(createMcpServer({ capsule }), "initialize", {
       protocolVersion: "1999-01-01",
     });
-    assert.equal(unknown["protocolVersion"], MCP_PROTOCOL_VERSION);
+    assert.equal(ancient["protocolVersion"], "2024-11-05");
 
     // A request that names no revision at all stays native, malformed params included.
     for (const params of [undefined, {}, { protocolVersion: 7 }]) {

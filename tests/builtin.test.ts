@@ -194,16 +194,19 @@ test("capsule_info rejects additional properties with JSON-RPC InvalidParams (-3
   });
 });
 
-test("capsule_runs returns empty array when no runs have occurred", async () => {
+test("capsule_runs returns an empty runs object when no runs have occurred", async () => {
   await withHome(async (home) => {
     const capsule = await packFixture(home);
     const server = createMcpServer({ capsule });
 
+    // `{ runs: [] }`, never a bare array: `structuredContent` is a JSON object in the
+    // specification, and a client that validates the envelope (Claude Desktop) rejects the whole
+    // result over an array there — the shape must not depend on how many runs exist.
     const result = await callTool(server, { name: "capsule_runs", arguments: {} });
     assert.equal(result.resultType, "complete");
     assert.equal(result.isError, false);
-    assert.deepEqual(result.structuredContent, []);
-    assert.equal(result.content?.[0]?.text, "[]");
+    assert.deepEqual(result.structuredContent, { runs: [] });
+    assert.equal(result.content?.[0]?.text, '{"runs":[]}');
   });
 });
 
@@ -223,12 +226,14 @@ test("capsule_runs returns recent runs newest first and respects limit", async (
 
     // Query all runs (default limit 10)
     const runsResult = await callTool(server, { name: "capsule_runs", arguments: {} });
-    const runs = runsResult.structuredContent as {
-      runId: string;
-      tool: string;
-      status: string;
-      startedAt: string;
-    }[];
+    const { runs } = runsResult.structuredContent as {
+      runs: {
+        runId: string;
+        tool: string;
+        status: string;
+        startedAt: string;
+      }[];
+    };
 
     assert.equal(runs.length, 2);
     // Newest first
@@ -244,7 +249,7 @@ test("capsule_runs returns recent runs newest first and respects limit", async (
 
     // Query with limit 1
     const limitResult = await callTool(server, { name: "capsule_runs", arguments: { limit: 1 } });
-    const limitedRuns = limitResult.structuredContent as { runId: string }[];
+    const limitedRuns = (limitResult.structuredContent as { runs: { runId: string }[] }).runs;
     assert.equal(limitedRuns.length, 1);
     assert.equal(limitedRuns[0]?.runId, runId2);
   });
@@ -350,8 +355,8 @@ test("handleBuiltinCall directly executes capsule_info, capsule_runs, and capsul
     const info = (await handleBuiltinCall("capsule_info", {}, ctx)) as { capsuleId: string };
     assert.equal(info.capsuleId, capsule.capsuleId);
 
-    const runs = (await handleBuiltinCall("capsule_runs", { limit: 5 }, ctx)) as unknown[];
-    assert.deepEqual(runs, []);
+    const runs = (await handleBuiltinCall("capsule_runs", { limit: 5 }, ctx)) as { runs: unknown[] };
+    assert.deepEqual(runs, { runs: [] });
   });
 });
 
@@ -484,7 +489,7 @@ test("Manifest with tool named capsule_test throws E_CONTENT: reserved tool name
   );
 });
 
-test("capsule_runs when journal does not exist returns [] without creating any .journal.sqlite file", async () => {
+test("capsule_runs when journal does not exist answers empty without creating any .journal.sqlite file", async () => {
   await withHome(async (home) => {
     const capsule = await packFixture(home);
     const server = createMcpServer({ capsule });
@@ -495,7 +500,7 @@ test("capsule_runs when journal does not exist returns [] without creating any .
     const result = await callTool(server, { name: "capsule_runs", arguments: {} });
     assert.equal(result.resultType, "complete");
     assert.equal(result.isError, false);
-    assert.deepEqual(result.structuredContent, []);
+    assert.deepEqual(result.structuredContent, { runs: [] });
 
     assert.equal(existsSync(journalPath), false);
   });
