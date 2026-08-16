@@ -98,6 +98,7 @@ describe("capsule build-manager-mcpb", () => {
       const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
       assert.equal(manifest.manifest_version, "0.2");
       assert.equal(manifest.name, "capsule-manager");
+      assert.equal(manifest.display_name, "Capsule Manager");
       assert.equal(manifest.version, HOST_VERSION);
       assert.ok(typeof manifest.description === "string" && manifest.description.length > 50);
       assert.ok(manifest.description.includes("capsule_install"));
@@ -200,13 +201,12 @@ describe("capsule build-manager-mcpb", () => {
       });
 
       assert.equal(listRes.id, 2);
+      type SchemaNode = { description?: string; properties?: Record<string, SchemaNode> };
       type ToolItem = {
         name: string;
         title?: string;
         description: string;
-        inputSchema?: {
-          properties?: Record<string, { description?: string; properties?: Record<string, { description?: string }> }>;
-        };
+        inputSchema?: SchemaNode;
       };
       const tools = listRes.result["tools"] as ToolItem[];
       const toolNames = tools.map((t) => t.name);
@@ -254,6 +254,36 @@ describe("capsule build-manager-mcpb", () => {
 
       const createNetDesc = createTool.inputSchema?.properties?.["capabilities"]?.properties?.["net"]?.description ?? "";
       assert.ok(createNetDesc.includes("capsule.fetch"), "net capability description must mention capsule.fetch");
+
+      // allowed_hosts must state the real matching semantics (src/runtime/policy.ts matchesPattern)
+      const createHostsDesc =
+        createTool.inputSchema?.properties?.["capabilities"]?.properties?.["net"]?.properties?.["allowed_hosts"]
+          ?.description ?? "";
+      assert.ok(
+        createHostsDesc.includes("`*.example.com`"),
+        "allowed_hosts description must show the '*.' wildcard form that the manifest schema allows",
+      );
+      assert.match(createHostsDesc, /subdomain/i, "allowed_hosts description must say a '*.' entry covers subdomains");
+      assert.match(
+        createHostsDesc,
+        /not the apex/i,
+        "allowed_hosts description must say a '*.' entry does not cover the apex domain",
+      );
+      assert.ok(
+        !/wildcard[^.]*exact/i.test(createHostsDesc),
+        "allowed_hosts description must not claim wildcards are matched as exact domain strings",
+      );
+      assert.match(createHostsDesc, /blocked/i, "allowed_hosts description must say unmatched hosts are blocked");
+      assert.match(
+        createHostsDesc,
+        /IP address/i,
+        "allowed_hosts description must say IP addresses are not reachable through this list",
+      );
+      assert.match(
+        createHostsDesc,
+        /only the hosts the user/i,
+        "allowed_hosts description must keep the guardrail about listing only hosts the user named",
+      );
 
       // Verify capsule_update accurate guest ABI descriptions
       const updateTool = tools.find((t) => t.name === "capsule_update")!;

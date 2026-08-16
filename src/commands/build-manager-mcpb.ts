@@ -44,6 +44,7 @@ export async function buildManagerMcpb(
   const manifestJson = {
     manifest_version: "0.2",
     name: "capsule-manager",
+    display_name: "Capsule Manager",
     version: HOST_VERSION,
     description: MANAGER_DESCRIPTION,
     author: { name: "Agent Capsule" },

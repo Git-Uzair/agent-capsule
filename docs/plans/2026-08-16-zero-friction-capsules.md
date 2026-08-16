@@ -133,8 +133,8 @@ Attempt ledger:
 - TOFU pinning happens on that first load, exactly as with CLI usage. Document in `docs/SPEC.md` §7 (one paragraph: "MCPB delivery does not bypass verification").
 
 ### P2 — The Capsule Manager extension (the platform)
-Status: completed
-Failed verify cycles: 5 (on P2-4)
+Status: in_progress
+Failed verify cycles: 2 (on P2-5)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
 - P2-1/P2-2 attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
@@ -152,7 +152,8 @@ Attempt ledger:
 - P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> FAIL (DUPLICATION unused duplicate ManagerPipelineOptions type declaration)
 - P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> PASS (P2-4 verified)
 - P2-5 attempt 1: initial build-manager-mcpb implementation -> FAIL (inaccurate guest ABI in tool descriptions, empty -o path validation, EOF blank line in paths.ts, missing test coverage for description contents)
-- P2-5 attempt 2: fix guest ABI references in manager tool descriptions (capsule.fetch, capsule.kv.get/set, capsule.sql, QuickJS sandbox), validate empty -o path with E_USAGE in buildManagerMcpb and exportMcpb, strip trailing blank line in paths.ts, and add comprehensive assertions for manager tool descriptions, manifest descriptions, and empty -o path CLI/API rejections -> PASS (P2-5 verified)
+- P2-5 attempt 2: guest ABI descriptions, empty -o validation, paths.ts newline -> FAIL (inaccurate allowed_hosts wildcard semantics in description, missing display_name in manifest)
+- P2-5 attempt 3: state allowed_hosts semantics from policy.matchesPattern (exact host, or `*.` covering subdomains but not the apex, unmatched hosts and IP/loopback blocked) and add display_name "Capsule Manager" to the manager manifest, with tests pinning both -> pending verification
 
 
 

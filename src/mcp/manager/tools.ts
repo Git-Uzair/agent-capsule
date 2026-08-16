@@ -115,7 +115,8 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
                 allowed_hosts: {
                   type: "array",
                   items: { type: "string" },
-                  description: "Explicit list of allowed domain names for network fetch (wildcards must be exact domain strings; unlisted domains are blocked).",
+                  description:
+                    "Hosts `capsule.fetch` may reach, as lowercase domain names. An entry is either an exact host (`api.example.com`), or a `*.`-prefixed pattern (`*.example.com`) matching any subdomain below it but not the apex `example.com`, which has to be listed on its own. Every host that no entry matches is blocked, and IP addresses and loopback are never reachable through this list. Put only the hosts the user named here; never add a host of your own choosing.",
                 },
               },
             },
