@@ -133,7 +133,7 @@ Attempt ledger:
 - TOFU pinning happens on that first load, exactly as with CLI usage. Document in `docs/SPEC.md` §7 (one paragraph: "MCPB delivery does not bypass verification").
 
 ### P2 — The Capsule Manager extension (the platform)
-Status: in_progress
+Status: completed
 Failed verify cycles: 2 (on P2-5)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
@@ -212,14 +212,17 @@ Attempt ledger:
 
 ### P3 — Everyone else (non-Claude clients) + the file itself
 Status: completed
-Failed verify cycles: 1
+Failed verify cycles: 2
 Attempt ledger:
 - P3 attempt 1: initial share command, installer page, and docs rewrite -> FAIL (inline onclick CSP violation in installer page, README manager options mismatch, directory .mcpb detection, generateMcpServerConfig duplication, missing Open UI button)
-- P3 attempt 2: fix CSP inline onclick handlers using event listeners, sync README CLI table with manager flags, handle directory .mcpb detection with isFile check, unify generateMcpServerConfig, add Open Capsule UI and Add to Claude Desktop sections -> PASS
+- P3 attempt 2: event listeners for copy buttons without inline onclick, unified generateMcpServerConfig, statSync isFile check for .mcpb detection, Open UI and Add to Claude Desktop buttons in installer page, accurate README flags -> FAIL (Cursor deeplink base64 encoding, VS Code JSON query format, mcpServers top-level JSON wrapper, DISTRIBUTION doc sync)
+- P3 attempt 3: base64 percent-encoded Cursor deeplink, query-encoded VS Code deeplink object, top-level mcpServers wrapper, claude_desktop_config.json instruction in installer page, docs/DISTRIBUTION.md wire format spec -> PASS (P3 verified)
 
 **Verification Record (P3):**
-- Automated acceptance: PASS (tests in `tests/share.test.ts` verify deeplinks, mcpServers config, .mcpb discovery ignoring directories, and --json output; tests in `tests/ui-server.test.ts` verify installer discovery page, CSP compliant event listeners, Open Capsule UI buttons, and token authentication).
+- Automated acceptance: PASS (tests in `tests/share.test.ts` verify vendor-accurate deeplinks, mcpServers wrapper config, .mcpb discovery, and --json output; tests in `tests/ui-server.test.ts` verify installer discovery page with CSP event listeners, Open Capsule UI buttons, and token authentication).
 - Manual acceptance: NOT PERFORMED (unattended CLI session; manual verification flagged for human owner).
+
+
 
 **P3-1. Deep links & snippets: `capsule share <file>`.**
 - Prints (and returns as JSON with `--json`): the Cursor deeplink, the VS Code `vscode:mcp/install` link, the exact `mcpServers` JSON block, the `npx agent-capsule mcp <abs path>` one-liner, and the `.mcpb` path if present. This is the "copy one thing into your other agent" story; the *sender* runs it (or their agent does).
