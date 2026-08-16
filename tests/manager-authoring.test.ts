@@ -965,6 +965,93 @@ test("Manager Authoring Guardrails: suspicious prompt injection markers install 
   });
 });
 
+test("Manager Authoring: capsule_test_tool refuses a capsuleId and name that address different capsules", async () => {
+  await withHome(async (home, downloads) => {
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+
+    const pingTool = {
+      name: "ping",
+      title: "Ping",
+      description: "Answers with the capsule name.",
+      inputSchema: { type: "object" },
+    };
+
+    async function create(name: string): Promise<string> {
+      const res = await server.handleMessage(
+        rpc("tools/call", {
+          name: "capsule_create",
+          arguments: {
+            name,
+            title: `Capsule ${name}`,
+            description: `Answers with ${name}.`,
+            source: `globalThis.tools = { ping() { return { from: "${name}" }; } };`,
+            tools: [pingTool],
+          },
+        }),
+      );
+      assert.ok(res && "result" in res);
+      const created = res.result as {
+        isError: boolean;
+        structuredContent: { capsuleId: string; message: string };
+      };
+      assert.equal(created.isError, false, created.structuredContent.message);
+      return created.structuredContent.capsuleId;
+    }
+
+    const oneId = await create("one");
+    const twoId = await create("two");
+
+    const testTool = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const res = await server.handleMessage(
+        rpc("tools/call", { name: "capsule_test_tool", arguments: { tool: "ping", ...args } }),
+      );
+      assert.ok(res !== undefined);
+      return res as Record<string, unknown>;
+    };
+
+    // The pair disagrees: 'one' is addressed by id, 'two' is named. Refused rather than resolved —
+    // either answer runs a tool of a capsule the caller did not address, and the author would read
+    // 'one's echo, _meta and journalled effects as 'two's. Same refusal capsule_update makes.
+    const mismatchRes = await testTool({ capsuleId: oneId, name: "two" });
+    assert.ok("error" in mismatchRes);
+    const mismatchError = mismatchRes["error"] as { code: number; message: string };
+    assert.equal(mismatchError.code, JSON_RPC_ERROR.InvalidParams);
+    assert.ok(mismatchError.message.includes(oneId));
+    assert.ok(mismatchError.message.includes("'one'"));
+    assert.ok(mismatchError.message.includes("'two'"));
+
+    // An id this host does not have is the same refusal: nothing confirms the pair agrees, so the
+    // name alone must not decide whose tool runs.
+    const unknownRes = await testTool({ capsuleId: `sha256:${"0".repeat(64)}`, name: "two" });
+    assert.ok("error" in unknownRes);
+    assert.equal((unknownRes["error"] as { code: number }).code, JSON_RPC_ERROR.InvalidParams);
+
+    // The agreeing pair still runs, and runs the capsule both halves name.
+    const agreeRes = await testTool({ capsuleId: twoId, name: "two" });
+    assert.ok("result" in agreeRes);
+    const agreeResult = agreeRes["result"] as {
+      isError: boolean;
+      structuredContent: { from: string };
+    };
+    assert.equal(agreeResult.isError, false);
+    assert.equal(agreeResult.structuredContent.from, "two");
+
+    // And either half alone addresses its own capsule exactly as before.
+    const byIdRes = await testTool({ capsuleId: oneId });
+    assert.ok("result" in byIdRes);
+    assert.equal(
+      (byIdRes["result"] as { structuredContent: { from: string } }).structuredContent.from,
+      "one",
+    );
+    const byNameRes = await testTool({ name: "one" });
+    assert.ok("result" in byNameRes);
+    assert.equal(
+      (byNameRes["result"] as { structuredContent: { from: string } }).structuredContent.from,
+      "one",
+    );
+  });
+});
+
 test("Manager Authoring Guardrails: capsule_update refuses a capsuleId and name that address different capsules", async () => {
   await withHome(async (home, downloads) => {
     const server = createManagerServer({ homeDir: home, downloadsDir: downloads });

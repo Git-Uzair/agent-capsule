@@ -417,7 +417,30 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
       );
     }
 
-    const route = [...(await buildGateway()).routes.values()].find(
+    const gateway = await buildGateway();
+
+    // Two ways of naming one capsule, so they have to name the same one. Refused rather than
+    // resolved by precedence: with a disagreeing pair, either answer runs a tool of a capsule the
+    // caller did not address, and the author reading the result — the whole point of this tool —
+    // would credit the run, its `_meta` and its journalled effects to the capsule it named. Same
+    // refusal `capsule_update` makes for this pair, and `capsule_install` for `path` +
+    // `from_downloads`: the caller re-sends the one it meant.
+    if (capsuleId !== undefined && name !== undefined) {
+      const addressed = gateway.capsules.find((row) => row.capsuleId === capsuleId);
+      if (addressed?.name !== name) {
+        throw new RpcFailure(
+          JSON_RPC_ERROR.InvalidParams,
+          `capsule_test_tool was given capsuleId '${sanitizeModelText(capsuleId, 120)}' (` +
+            (addressed === undefined
+              ? "not installed"
+              : `capsule '${sanitizeModelText(addressed.name, 120)}'`) +
+            `) and name '${sanitizeModelText(name, 120)}', which address different capsules: ` +
+            `send one or the other`,
+        );
+      }
+    }
+
+    const route = [...gateway.routes.values()].find(
       (candidate) =>
         candidate.innerName === tool &&
         (capsuleId === undefined

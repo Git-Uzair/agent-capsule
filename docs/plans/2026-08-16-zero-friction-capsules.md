@@ -148,7 +148,8 @@ Attempt ledger:
 - P2-4 attempt 1: initial authoring implementation -> FAIL (missing suspicious text screening on create, duplicated install pipeline logic, conditional test assertion on mcpb_file)
 - P2-4 attempt 2: deduplicate install pipeline into installLoadedCapsule with prompt injection screening, confusable checks, and capabilities/keyId/trust reporting, ensure dist built and assert mcpb_file unconditionally -> FAIL (pre-screening loadCapsule TOFU pin poisoning on refusal, implicit drift auto-accept in update, capsule_test_tool result shape divergence, duplicate parseManifest checks)
 - P2-4 attempt 3: screenManifest pre-pack before loadCapsule to prevent pin poisoning, explicit accept_drift in authoring, callCapsuleTool shared dispatch for capsule_test_tool returning gateway envelope, delete parseManifest duplicate checks -> FAIL (mismatched capsuleId and name in capsule_update silently mixing versions)
-
+- P2-4 attempt 4: validate capsuleId and name agreement in capsule_update with InvalidParams, isolate version bump to matching entry -> FAIL (capsule_test_tool silently ignored name when capsuleId and name mismatched)
+- P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> pending verification
 
 **P2-1. Manager server core.**
 - New command `capsule manager` (`src/commands/manager.ts` + `src/mcp/manager/` module). Stdio MCP server, built on the existing `transport.ts` + a handler map like `createMcpServer`, with:
