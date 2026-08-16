@@ -149,12 +149,22 @@ test("Manager server: handshake, discover, ping, and initial tools/list", async 
     const pingRes = await server.handleMessage(rpc("ping"));
     assert.ok(pingRes && "result" in pingRes);
 
-    // Test tools/list contains only built-in manager tools for P2-1/P2-2
+    // Test tools/list contains built-in manager tools
     const listRes = await server.handleMessage(rpc("tools/list"));
     assert.ok(listRes && "result" in listRes);
     const listResult = listRes.result as { tools: Array<{ name: string; description: string }> };
     const toolNames = listResult.tools.map((t) => t.name);
-    assert.deepEqual(toolNames.sort(), ["capsule_install", "capsule_list", "capsule_uninstall"].sort());
+    assert.deepEqual(
+      toolNames.sort(),
+      [
+        "capsule_create",
+        "capsule_install",
+        "capsule_list",
+        "capsule_test_tool",
+        "capsule_uninstall",
+        "capsule_update",
+      ].sort(),
+    );
   });
 });
 
@@ -489,7 +499,7 @@ test("Manager server: gateway confusable collision suppresses newer capsule", as
 
     // Suppression covers the whole capsule, not just the colliding name: one capsule's four tools
     // (its own plus the three built-ins) reach the catalog, never both capsules' eight.
-    assert.equal(toolNames.length, 3 + 4);
+    assert.equal(toolNames.length, 6 + 4);
 
     // The summary the agent reads back names exactly what the gateway serves for that capsule.
     const install2Result = (install2 as { result: { structuredContent: { capsuleId: string; tools: string[] } } })

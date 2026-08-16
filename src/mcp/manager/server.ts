@@ -29,6 +29,11 @@ import {
   type Transport,
 } from "../transport.ts";
 import { confusableSkeleton, sanitizeModelText } from "../../security/text.ts";
+import {
+  handleCapsuleCreate,
+  handleCapsuleTestTool,
+  handleCapsuleUpdate,
+} from "./authoring.ts";
 import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
 import {
   GATEWAY_NAME_PATTERN,
@@ -107,7 +112,8 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
 
   const instructions = (): string =>
     "Capsule Manager is a gateway for sandboxed Agent Capsules. " +
-    "Use capsule_install to install a capsule, capsule_list to see installed capsules, and capsule_uninstall to remove a capsule. " +
+    "Use capsule_create and capsule_update to author capsules in conversation, capsule_test_tool to test tools, " +
+    "capsule_install to install a capsule, capsule_list to see installed capsules, and capsule_uninstall to remove a capsule. " +
     "Installed capsules expose their tools under <capsuleName>__<toolName>.";
 
   function invalidateCache(): void {
@@ -294,6 +300,39 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
         }),
     ],
     ["capsule_list", async () => handleCapsuleList((await buildGateway()).capsules)],
+    [
+      "capsule_create",
+      (args) =>
+        handleCapsuleCreate(args, {
+          homeDir: opts.homeDir,
+          warn,
+          notifyListChanged,
+          invalidateCache,
+          servedTools,
+        }),
+    ],
+    [
+      "capsule_update",
+      (args) =>
+        handleCapsuleUpdate(args, {
+          homeDir: opts.homeDir,
+          warn,
+          notifyListChanged,
+          invalidateCache,
+          servedTools,
+        }),
+    ],
+    [
+      "capsule_test_tool",
+      (args) =>
+        handleCapsuleTestTool(args, {
+          homeDir: opts.homeDir,
+          warn,
+          notifyListChanged,
+          invalidateCache,
+          servedTools,
+        }),
+    ],
   ]);
 
   async function handleToolsCallGateway(params: unknown): Promise<Record<string, unknown>> {

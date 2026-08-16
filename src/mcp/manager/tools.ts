@@ -27,6 +27,204 @@ import {
  */
 export const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
+export const AUTHORING_TOOLS: readonly CatalogTool[] = [
+  {
+    name: "capsule_create",
+    title: "Create Capsule",
+    description:
+      "Create, test, conform, sign, and install a new Agent Capsule from guest JavaScript source code.",
+    inputSchema: {
+      type: "object",
+      required: ["name", "source", "tools"],
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the capsule ([a-zA-Z0-9_-], 1-64 characters).",
+        },
+        title: {
+          type: "string",
+          description: "Human-readable title (1-80 characters).",
+        },
+        description: {
+          type: "string",
+          description: "Short description of the capsule (1-500 characters).",
+        },
+        version: {
+          type: "string",
+          description: "Semver version string (defaults to '0.1.0').",
+        },
+        source: {
+          type: "string",
+          description: "Guest JavaScript source code defining globalThis.tools.",
+        },
+        tools: {
+          type: "array",
+          description: "Array of tool definitions provided by the guest code.",
+          items: {
+            type: "object",
+            required: ["name"],
+            properties: {
+              name: {
+                type: "string",
+                description: "Tool name ([a-zA-Z0-9_-], 1-64 characters).",
+              },
+              title: {
+                type: "string",
+                description: "Tool title (1-80 characters).",
+              },
+              description: {
+                type: "string",
+                description: "Tool description (1-1024 characters).",
+              },
+              inputSchema: {
+                type: "object",
+                description: "JSON Schema for tool arguments.",
+              },
+              outputSchema: {
+                type: "object",
+                description: "Optional JSON Schema for tool return value.",
+              },
+              effects: {
+                type: "array",
+                items: { type: "string" },
+                description: "Declared effects (e.g. kv.get, kv.set, sql.query, sql.exec, net.fetch).",
+              },
+            },
+          },
+        },
+        capabilities: {
+          type: "object",
+          description: "Capabilities required by the capsule.",
+          properties: {
+            kv: {
+              type: "boolean",
+              description: "Enable key-value storage capability.",
+            },
+            sql: {
+              type: "boolean",
+              description: "Enable SQLite storage capability.",
+            },
+            net: {
+              type: "object",
+              description: "Network egress capability configuration.",
+              properties: {
+                allowed_hosts: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Explicit list of allowed domain names for network fetch.",
+                },
+              },
+            },
+          },
+        },
+        ui_html: {
+          type: "string",
+          description: "Optional HTML/JS UI content to bundle with the capsule.",
+        },
+      },
+    },
+    effects: [],
+  },
+  {
+    name: "capsule_update",
+    title: "Update Capsule",
+    description:
+      "Update an existing Agent Capsule's source code or tools, bump version, re-sign, test conformance, and update installation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capsuleId: {
+          type: "string",
+          description: "ID of the installed capsule to update.",
+        },
+        name: {
+          type: "string",
+          description: "Name of the capsule to update.",
+        },
+        title: {
+          type: "string",
+          description: "Updated title (1-80 characters).",
+        },
+        description: {
+          type: "string",
+          description: "Updated description (1-500 characters).",
+        },
+        version: {
+          type: "string",
+          description: "Explicit semver version string (auto-bumps patch if omitted).",
+        },
+        source: {
+          type: "string",
+          description: "Updated guest JavaScript source code defining globalThis.tools.",
+        },
+        tools: {
+          type: "array",
+          description: "Updated array of tool definitions.",
+          items: {
+            type: "object",
+            required: ["name"],
+            properties: {
+              name: { type: "string" },
+              title: { type: "string" },
+              description: { type: "string" },
+              inputSchema: { type: "object" },
+              outputSchema: { type: "object" },
+              effects: { type: "array", items: { type: "string" } },
+            },
+          },
+        },
+        capabilities: {
+          type: "object",
+          properties: {
+            kv: { type: "boolean" },
+            sql: { type: "boolean" },
+            net: {
+              type: "object",
+              properties: {
+                allowed_hosts: { type: "array", items: { type: "string" } },
+              },
+            },
+          },
+        },
+        ui_html: {
+          type: "string",
+          description: "Updated HTML/JS UI content.",
+        },
+      },
+    },
+    effects: [],
+  },
+  {
+    name: "capsule_test_tool",
+    title: "Test Capsule Tool",
+    description:
+      "Execute a single sandboxed invocation of a tool in an installed capsule or workspace to verify output and journal effects before finalizing.",
+    inputSchema: {
+      type: "object",
+      required: ["tool"],
+      properties: {
+        capsuleId: {
+          type: "string",
+          description: "ID of the capsule to test.",
+        },
+        name: {
+          type: "string",
+          description: "Name of the capsule to test.",
+        },
+        tool: {
+          type: "string",
+          description: "Name of the tool to invoke.",
+        },
+        args: {
+          type: "object",
+          description: "Arguments to pass to the tool.",
+        },
+      },
+    },
+    effects: [],
+  },
+];
+
 export const MANAGER_TOOLS: readonly CatalogTool[] = [
   {
     name: "capsule_install",
@@ -88,6 +286,7 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
     },
     effects: [],
   },
+  ...AUTHORING_TOOLS,
 ];
 
 export type ToolExecutionResult = {
