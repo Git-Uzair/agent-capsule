@@ -134,7 +134,7 @@ Attempt ledger:
 
 ### P2 — The Capsule Manager extension (the platform)
 Status: in_progress
-Failed verify cycles: 4 (on P2-3)
+Failed verify cycles: 3 (on P2-4)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
 - P2-1/P2-2 attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
@@ -146,9 +146,8 @@ Attempt ledger:
 - P2-3 attempt 3: export formatPolicyDenial from src/mcp/call.ts, construct terminal refusal with createResultBuilder(ctx.resultMeta), truth-preserving refusal reasons -> FAIL (fabricated decline masking unresolved timeouts/errors, call.ts deny _meta missing grants/identity, legacySession sentence on 2026-07-28 sessions)
 - P2-3 attempt 5: add explicit {action: "cancel"} test in tests/manager-elicitation.test.ts -> PASS (P2-3 verified)
 - P2-4 attempt 1: initial authoring implementation -> FAIL (missing suspicious text screening on create, duplicated install pipeline logic, conditional test assertion on mcpb_file)
-- P2-4 attempt 2: deduplicate install pipeline into installLoadedCapsule with prompt injection screening, confusable checks, and capabilities/keyId/trust reporting, ensure dist built and assert mcpb_file unconditionally -> PASS (P2-4 verified)
-
-
+- P2-4 attempt 2: deduplicate install pipeline into installLoadedCapsule with prompt injection screening, confusable checks, and capabilities/keyId/trust reporting, ensure dist built and assert mcpb_file unconditionally -> FAIL (pre-screening loadCapsule TOFU pin poisoning on refusal, implicit drift auto-accept in update, capsule_test_tool result shape divergence, duplicate parseManifest checks)
+- P2-4 attempt 3: screenManifest pre-pack before loadCapsule to prevent pin poisoning, explicit accept_drift in authoring, callCapsuleTool shared dispatch for capsule_test_tool returning gateway envelope, delete parseManifest duplicate checks -> FAIL (mismatched capsuleId and name in capsule_update silently mixing versions)
 
 
 **P2-1. Manager server core.**

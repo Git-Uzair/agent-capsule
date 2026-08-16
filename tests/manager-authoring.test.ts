@@ -964,3 +964,108 @@ test("Manager Authoring Guardrails: suspicious prompt injection markers install 
     assert.ok(updatedStore.capsules[allowResult.structuredContent.capsuleId]);
   });
 });
+
+test("Manager Authoring Guardrails: capsule_update refuses a capsuleId and name that address different capsules", async () => {
+  await withHome(async (home, downloads) => {
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+
+    const pingTool = {
+      name: "ping",
+      title: "Ping",
+      description: "Answers with the capsule name.",
+      inputSchema: { type: "object" },
+    };
+
+    async function create(name: string, version: string): Promise<string> {
+      const res = await server.handleMessage(
+        rpc("tools/call", {
+          name: "capsule_create",
+          arguments: {
+            name,
+            version,
+            title: `Capsule ${name}`,
+            description: `Answers with ${name}.`,
+            source: `globalThis.tools = { ping() { return { from: "${name}" }; } };`,
+            tools: [pingTool],
+          },
+        }),
+      );
+      assert.ok(res && "result" in res);
+      const created = res.result as {
+        isError: boolean;
+        structuredContent: { capsuleId: string; version: string; message: string };
+      };
+      assert.equal(created.isError, false, created.structuredContent.message);
+      assert.equal(created.structuredContent.version, version);
+      return created.structuredContent.capsuleId;
+    }
+
+    const oneId = await create("one", "3.4.5");
+    const twoId = await create("two", "1.0.0");
+
+    const updateArgs = {
+      source: `globalThis.tools = { ping() { return { from: "updated" }; } };`,
+      tools: [pingTool],
+    };
+
+    // The pair disagrees: 'one' is addressed by id, 'two' is named. Refused rather than resolved —
+    // either answer rebuilds a capsule the caller did not address, and the patch bump would be read
+    // from the version of the other one (3.4.5 -> 3.4.6, shipped as 'two'). The same refusal
+    // capsule_install makes for 'path' + 'from_downloads': the caller re-sends the one it meant.
+    const mismatchRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_update",
+        arguments: { capsuleId: oneId, name: "two", ...updateArgs },
+      }),
+    );
+    assert.ok(mismatchRes && "error" in mismatchRes);
+    assert.equal(mismatchRes.error.code, JSON_RPC_ERROR.InvalidParams);
+    assert.ok(mismatchRes.error.message.includes(oneId));
+    assert.ok(mismatchRes.error.message.includes("'one'"));
+    assert.ok(mismatchRes.error.message.includes("'two'"));
+
+    // Neither entry moved: no 3.4.6 under either name, and 'two' still ships what it shipped.
+    const refused = loadInstalledStore(home);
+    assert.deepEqual(
+      Object.values(refused.capsules)
+        .map((entry) => `${entry.name}@${entry.version}`)
+        .sort(),
+      ["one@3.4.5", "two@1.0.0"],
+    );
+
+    // An id this host does not have is the same refusal: nothing confirms the pair agrees, so the
+    // name alone must not decide what gets rebuilt.
+    const unknownRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_update",
+        arguments: { capsuleId: `sha256:${"0".repeat(64)}`, name: "two", ...updateArgs },
+      }),
+    );
+    assert.ok(unknownRes && "error" in unknownRes);
+    assert.equal(unknownRes.error.code, JSON_RPC_ERROR.InvalidParams);
+
+    // The agreeing pair is not refused, and bumps from its own version: 1.0.0 -> 1.0.1.
+    const agreeRes = await server.handleMessage(
+      rpc("tools/call", {
+        name: "capsule_update",
+        arguments: { capsuleId: twoId, name: "two", ...updateArgs },
+      }),
+    );
+    assert.ok(agreeRes && "result" in agreeRes);
+    const agreeResult = agreeRes.result as {
+      isError: boolean;
+      structuredContent: { ok: boolean; name: string; version: string; message: string };
+    };
+    assert.equal(agreeResult.isError, false, agreeResult.structuredContent.message);
+    assert.equal(agreeResult.structuredContent.name, "two");
+    assert.equal(agreeResult.structuredContent.version, "1.0.1");
+
+    const after = loadInstalledStore(home);
+    assert.deepEqual(
+      Object.values(after.capsules)
+        .map((entry) => `${entry.name}@${entry.version}`)
+        .sort(),
+      ["one@3.4.5", "two@1.0.1"],
+    );
+  });
+});

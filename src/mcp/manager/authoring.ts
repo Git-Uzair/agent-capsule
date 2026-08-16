@@ -8,7 +8,7 @@ import { loadCapsule, packDirectory, type LoadedCapsule, type PackResult } from 
 import { parseManifest, type EffectName, type Manifest, type ManifestTool } from "../../format/manifest.ts";
 import { capsuleHome } from "../../security/signing.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
-import { loadInstalledStore } from "./registry.ts";
+import { loadInstalledStore, type InstalledEntry } from "./registry.ts";
 import {
   installLoadedCapsule,
   loadRefusal,
@@ -81,10 +81,10 @@ async function executeAuthoringPipeline(
   let name = typeof args["name"] === "string" ? args["name"].trim() : "";
   const capsuleId = typeof args["capsuleId"] === "string" ? args["capsuleId"].trim() : undefined;
 
-  let existingEntry = capsuleId ? store.capsules[capsuleId] : undefined;
-  if (!existingEntry && name) {
-    existingEntry = Object.values(store.capsules).find((e) => e.name === name);
-  }
+  // The entry this pipeline may consult for the version to bump. Only ever an entry whose own name
+  // is the name being built, so the bump cannot be read off a capsule that is not being rebuilt.
+  // `capsule_create` takes no `capsuleId` at all, so this is `capsule_update`'s question alone.
+  let existingEntry: InstalledEntry | undefined;
 
   if (isUpdate) {
     if (!name && !capsuleId) {
@@ -93,9 +93,27 @@ async function executeAuthoringPipeline(
         "capsule_update requires either 'name' or 'capsuleId'",
       );
     }
-    if (existingEntry) {
-      if (!name) name = existingEntry.name;
-    } else {
+
+    const addressed = capsuleId ? store.capsules[capsuleId] : undefined;
+
+    // Two ways of naming one capsule, so they have to name the same one. Refused rather than
+    // resolved: with a disagreeing pair, either answer rebuilds and installs a capsule the caller
+    // did not address while the one it did address is left untouched — and the patch bump would come
+    // from the version of the capsule that is not being built. Same refusal `capsule_install` makes
+    // for `path` + `from_downloads`: the caller re-sends the one it meant.
+    if (capsuleId && name && addressed?.name !== name) {
+      throw new RpcFailure(
+        JSON_RPC_ERROR.InvalidParams,
+        `capsule_update was given capsuleId '${capsuleId}' (` +
+          (addressed === undefined ? "not installed" : `capsule '${addressed.name}'`) +
+          `) and name '${name}', which address different capsules: send one or the other`,
+      );
+    }
+
+    if (!name && addressed) name = addressed.name;
+    existingEntry = addressed ?? Object.values(store.capsules).find((e) => e.name === name);
+
+    if (!existingEntry) {
       // Check if a workspace already exists by name
       const ws = workspaceDir(name, home);
       if (!existsSync(join(ws, "capsule.json"))) {

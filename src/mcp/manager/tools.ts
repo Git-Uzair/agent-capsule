@@ -148,7 +148,8 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
       properties: {
         capsuleId: {
           type: "string",
-          description: "ID of the installed capsule to update.",
+          description:
+            "ID of the installed capsule to update. If 'name' is given too, both must address the same capsule.",
         },
         name: {
           type: "string",
