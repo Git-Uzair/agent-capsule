@@ -13,6 +13,7 @@ import {
   installLoadedCapsule,
   loadRefusal,
   screenManifest,
+  type ManagerPipelineOptions,
   type ToolExecutionResult,
 } from "./tools.ts";
 
@@ -40,14 +41,6 @@ export function bumpPatchVersion(version: string): string {
   return `${major}.${minor}.${patch}`;
 }
 
-export type ManagerAuthoringOptions = {
-  homeDir?: string;
-  warn: (line: string) => void;
-  notifyListChanged: () => void;
-  invalidateCache: () => void;
-  servedTools: (capsuleId: string) => Promise<string[]>;
-};
-
 /**
  * The capsule name alphabet this tool accepts: the schema's `meta.name` pattern minus `.`, which is
  * also the gateway namespace alphabet. Checked here rather than left to `parseManifest`, because the
@@ -57,21 +50,21 @@ const AUTHORED_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export async function handleCapsuleCreate(
   rawArgs: unknown,
-  opts: ManagerAuthoringOptions,
+  opts: ManagerPipelineOptions,
 ): Promise<ToolExecutionResult> {
   return executeAuthoringPipeline(rawArgs, opts, false);
 }
 
 export async function handleCapsuleUpdate(
   rawArgs: unknown,
-  opts: ManagerAuthoringOptions,
+  opts: ManagerPipelineOptions,
 ): Promise<ToolExecutionResult> {
   return executeAuthoringPipeline(rawArgs, opts, true);
 }
 
 async function executeAuthoringPipeline(
   rawArgs: unknown,
-  opts: ManagerAuthoringOptions,
+  opts: ManagerPipelineOptions,
   isUpdate: boolean,
 ): Promise<ToolExecutionResult> {
   const args = asRecord(rawArgs) ?? {};

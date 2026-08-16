@@ -319,9 +319,13 @@ export type ToolExecutionResult = {
   isError: boolean;
 };
 
+/**
+ * What every road into installation needs from the running manager: the two roads (`capsule_install`
+ * and authoring's `capsule_create`/`capsule_update`) hand the same bag to `installLoadedCapsule`, so
+ * one type names it once.
+ */
 export type ManagerPipelineOptions = {
   homeDir?: string;
-  downloadsDir?: string;
   warn: (line: string) => void;
   notifyListChanged: () => void;
   invalidateCache: () => void;
@@ -440,13 +444,7 @@ export function loadRefusal(err: unknown, retry: string): ToolExecutionResult {
 
 export async function installLoadedCapsule(
   loaded: LoadedCapsule,
-  opts: {
-    homeDir?: string;
-    warn: (line: string) => void;
-    notifyListChanged: () => void;
-    invalidateCache: () => void;
-    servedTools: (capsuleId: string) => Promise<string[]>;
-  },
+  opts: ManagerPipelineOptions,
   installOpts: InstallLoadedOptions = {},
 ): Promise<ToolExecutionResult> {
   const allowSuspicious = installOpts.allowSuspicious === true;
@@ -562,15 +560,8 @@ export async function installLoadedCapsule(
 
 export async function handleCapsuleInstall(
   rawArgs: unknown,
-  opts: {
-    homeDir?: string;
-    downloadsDir?: string;
-    warn: (line: string) => void;
-    notifyListChanged: () => void;
-    invalidateCache: () => void;
-    /** The names the gateway really serves for a capsuleId, so the summary cannot over-promise. */
-    servedTools: (capsuleId: string) => Promise<string[]>;
-  },
+  // `downloadsDir` is this tool's alone: it is the only road that finds the file by scanning.
+  opts: ManagerPipelineOptions & { downloadsDir?: string },
 ): Promise<ToolExecutionResult> {
   const args = asRecord(rawArgs) ?? {};
   const fromDownloads = args["from_downloads"] === true;

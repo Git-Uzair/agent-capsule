@@ -134,7 +134,7 @@ Attempt ledger:
 
 ### P2 — The Capsule Manager extension (the platform)
 Status: in_progress
-Failed verify cycles: 3 (on P2-4)
+Failed verify cycles: 5 (on P2-4)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
 - P2-1/P2-2 attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
@@ -149,7 +149,9 @@ Attempt ledger:
 - P2-4 attempt 2: deduplicate install pipeline into installLoadedCapsule with prompt injection screening, confusable checks, and capabilities/keyId/trust reporting, ensure dist built and assert mcpb_file unconditionally -> FAIL (pre-screening loadCapsule TOFU pin poisoning on refusal, implicit drift auto-accept in update, capsule_test_tool result shape divergence, duplicate parseManifest checks)
 - P2-4 attempt 3: screenManifest pre-pack before loadCapsule to prevent pin poisoning, explicit accept_drift in authoring, callCapsuleTool shared dispatch for capsule_test_tool returning gateway envelope, delete parseManifest duplicate checks -> FAIL (mismatched capsuleId and name in capsule_update silently mixing versions)
 - P2-4 attempt 4: validate capsuleId and name agreement in capsule_update with InvalidParams, isolate version bump to matching entry -> FAIL (capsule_test_tool silently ignored name when capsuleId and name mismatched)
-- P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> pending verification
+- P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> FAIL (DUPLICATION unused duplicate ManagerPipelineOptions type declaration)
+- P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> pending verification
+
 
 **P2-1. Manager server core.**
 - New command `capsule manager` (`src/commands/manager.ts` + `src/mcp/manager/` module). Stdio MCP server, built on the existing `transport.ts` + a handler map like `createMcpServer`, with:
