@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { exportMcpb } from "../../commands/export-mcpb.ts";
 import { asRecord } from "../../core/canonical.ts";
 import { CapsuleError } from "../../core/errors.ts";
 import { loadCapsule, type LoadedCapsule } from "../../format/capsule.ts";
@@ -12,6 +13,7 @@ import { scanDownloads, type DownloadCandidate } from "./downloads.ts";
 import {
   addInstalledCapsule,
   installedCapsulePath,
+  installedCapsulesDir,
   removeInstalledCapsule,
   removeInstalledCapsulesByName,
 } from "./registry.ts";
@@ -121,6 +123,11 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
           type: "string",
           description: "Optional HTML/JS UI content to bundle with the capsule.",
         },
+        allow_suspicious: {
+          type: "boolean",
+          description:
+            "Explicitly allow installing a capsule despite suspicious prompt injection markers or formatting in descriptions/schemas.",
+        },
       },
     },
     effects: [],
@@ -189,6 +196,11 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         ui_html: {
           type: "string",
           description: "Updated HTML/JS UI content.",
+        },
+        allow_suspicious: {
+          type: "boolean",
+          description:
+            "Explicitly allow installing a capsule despite suspicious prompt injection markers or formatting in descriptions/schemas.",
         },
       },
     },
@@ -295,6 +307,193 @@ export type ToolExecutionResult = {
   isError: boolean;
 };
 
+export type ManagerPipelineOptions = {
+  homeDir?: string;
+  downloadsDir?: string;
+  warn: (line: string) => void;
+  notifyListChanged: () => void;
+  invalidateCache: () => void;
+  /** The names the gateway really serves for a capsuleId, so the summary cannot over-promise. */
+  servedTools: (capsuleId: string) => Promise<string[]>;
+};
+
+export type InstallLoadedOptions = {
+  allowSuspicious?: boolean;
+  actionWord?: "Installed" | "Created" | "Updated";
+  targetFile?: string;
+  exportMcpb?: boolean;
+  shareHint?: string;
+};
+
+export async function installLoadedCapsule(
+  loaded: LoadedCapsule,
+  opts: {
+    homeDir?: string;
+    warn: (line: string) => void;
+    notifyListChanged: () => void;
+    invalidateCache: () => void;
+    servedTools: (capsuleId: string) => Promise<string[]>;
+  },
+  installOpts: InstallLoadedOptions = {},
+): Promise<ToolExecutionResult> {
+  const allowSuspicious = installOpts.allowSuspicious === true;
+  const actionWord = installOpts.actionWord ?? "Installed";
+  const isAuthoring = actionWord === "Created" || actionWord === "Updated";
+  const callerToolName = isAuthoring
+    ? actionWord === "Created"
+      ? "capsule_create"
+      : "capsule_update"
+    : "capsule_install";
+
+  // The gateway prefixes every tool with this name, so a name outside the namespace alphabet is
+  // refused before the file is copied anywhere. Safe to interpolate: capsule.json already limits
+  // `meta.name` to `[a-z0-9._-]`, and it is the `.` this rejects.
+  if (!GATEWAY_NAME_PATTERN.test(loaded.manifest.meta.name)) {
+    const text =
+      `Capsule '${loaded.manifest.meta.name}' cannot be served by the gateway: its name must match ` +
+      `[a-zA-Z0-9_-] (1-64 characters) so that '<capsuleName>__<toolName>' names one capsule ` +
+      `unambiguously. Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
+  }
+
+  // Refused at the door, exactly as the direct server refuses such a capsule before it serves
+  // anything: two tool names that read as one name are a phishing vector inside the capsule's own
+  // list, and `<capsuleName>__` prefixes both halves of the pair alike, so the gateway namespace
+  // inherits the ambiguity. Not overridable — there is no honest reason to declare both. Built-ins
+  // join the check because the reserved-prefix rule is case-sensitive (`Capsule_info` is legal).
+  // Names are `[a-zA-Z0-9_-]{1,64}` per schema, so the reported pair is safe to interpolate.
+  try {
+    assertNoToolNameCollision([
+      ...loaded.manifest.tools.map((tool) => tool.name),
+      ...BUILTIN_TOOLS.map((tool) => tool.name),
+    ]);
+  } catch (err) {
+    const detail = err instanceof CapsuleError ? err.message : String(err);
+    const text =
+      `Security Alert (Confusable Tool Names): Capsule '${loaded.manifest.meta.name}' declares two tool ` +
+      `names that read as the same name (${detail}). Installation refused.`;
+    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
+  }
+
+  // Screen for suspicious prompt injection markers or identifiers
+  const screeningWarnings: string[] = [];
+  buildToolList(loaded.manifest, {
+    allowSuspicious: false,
+    warn: (line) => screeningWarnings.push(line),
+  });
+
+  const metaMarkers = scanTextTree([loaded.manifest.meta.title, loaded.manifest.meta.description]);
+  if (metaMarkers.length > 0) {
+    screeningWarnings.push(`metadata: ${metaMarkers.join(", ")}`);
+  }
+
+  if (screeningWarnings.length > 0 && !allowSuspicious) {
+    const reRunMsg = installOpts.targetFile
+      ? `To install anyway, re-run capsule_install with { path: "${installOpts.targetFile}", allow_suspicious: true }.`
+      : `To install anyway, re-run ${callerToolName} with { allow_suspicious: true }.`;
+    const text =
+      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${screeningWarnings.join("; ")}). ` +
+      reRunMsg;
+    return {
+      text,
+      structured: { ok: false, error: "E_SUSPICIOUS", findings: screeningWarnings, message: text },
+      isError: true,
+    };
+  }
+
+  const destPath = installedCapsulePath(loaded.capsuleId, opts.homeDir);
+  mkdirSync(dirname(destPath), { recursive: true });
+  writeFileSync(destPath, loaded.bytes);
+
+  addInstalledCapsule(
+    loaded.capsuleId,
+    {
+      name: loaded.manifest.meta.name,
+      version: loaded.manifest.meta.version,
+      file: destPath,
+      installedAt: new Date().toISOString(),
+      ...(allowSuspicious ? { allowSuspicious: true } : {}),
+    },
+    opts.homeDir,
+  );
+
+  opts.invalidateCache();
+  opts.notifyListChanged();
+
+  let mcpbFile: string | undefined;
+  if (installOpts.exportMcpb) {
+    try {
+      const mcpbDest = join(
+        installedCapsulesDir(opts.homeDir),
+        `${loaded.manifest.meta.name}-${loaded.manifest.meta.version}.mcpb`,
+      );
+      mcpbFile = await exportMcpb(destPath, mcpbDest);
+    } catch (err) {
+      opts.warn(`Warning: failed to export .mcpb bundle: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const caps = declaredCapabilities(loaded.manifest);
+  // Read back from the gateway rather than from this manifest: a capsule whose names collide with one
+  // already installed is suppressed there, and a summary that named tools nobody can call would send
+  // the agent looking for them.
+  const gatewayTools = await opts.servedTools(loaded.capsuleId);
+
+  const titleLine =
+    actionWord === "Installed"
+      ? `Installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.`
+      : `${actionWord} and installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.`;
+
+  const lines: string[] = [
+    titleLine,
+    `• Capsule ID: ${loaded.capsuleId}`,
+    `• Publisher Key: ${loaded.keyId}`,
+    `• Trust State: ${loaded.trust}`,
+    `• Declared Capabilities: ${caps}`,
+  ];
+
+  if (isAuthoring) {
+    lines.push(`• File: ${destPath}`);
+    if (mcpbFile) {
+      lines.push(`• MCPB Bundle: ${mcpbFile}`);
+    }
+  }
+
+  lines.push(`• Exposed Tools: ${gatewayTools.length > 0 ? gatewayTools.join(", ") : "none"}`);
+
+  if (gatewayTools.length === 0) {
+    lines.push(
+      `• Warning: no tools are exposed — its tool names collide with an already installed capsule, ` +
+        `so this capsule is suppressed. Uninstall the other capsule to use this one.`,
+    );
+  }
+
+  if (installOpts.shareHint) {
+    lines.push(`• Share: ${installOpts.shareHint}`);
+  }
+
+  const text = lines.join("\n");
+
+  return {
+    text,
+    structured: {
+      ok: true,
+      capsuleId: loaded.capsuleId,
+      name: loaded.manifest.meta.name,
+      version: loaded.manifest.meta.version,
+      keyId: loaded.keyId,
+      trust: loaded.trust,
+      capabilities: caps,
+      ...(isAuthoring ? { file: destPath } : {}),
+      ...(mcpbFile ? { mcpb_file: mcpbFile } : {}),
+      tools: gatewayTools,
+      ...(installOpts.shareHint ? { share_hint: installOpts.shareHint } : {}),
+      message: text,
+    },
+    isError: false,
+  };
+}
+
 export async function handleCapsuleInstall(
   rawArgs: unknown,
   opts: {
@@ -388,110 +587,11 @@ export async function handleCapsuleInstall(
     return { text, structured: { ok: false, error: "E_CONTAINER", message: text }, isError: true };
   }
 
-  // The gateway prefixes every tool with this name, so a name outside the namespace alphabet is
-  // refused before the file is copied anywhere. Safe to interpolate: capsule.json already limits
-  // `meta.name` to `[a-z0-9._-]`, and it is the `.` this rejects.
-  if (!GATEWAY_NAME_PATTERN.test(loaded.manifest.meta.name)) {
-    const text =
-      `Capsule '${loaded.manifest.meta.name}' cannot be served by the gateway: its name must match ` +
-      `[a-zA-Z0-9_-] (1-64 characters) so that '<capsuleName>__<toolName>' names one capsule ` +
-      `unambiguously. Installation refused.`;
-    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-  }
-
-  // Refused at the door, exactly as the direct server refuses such a capsule before it serves
-  // anything: two tool names that read as one name are a phishing vector inside the capsule's own
-  // list, and `<capsuleName>__` prefixes both halves of the pair alike, so the gateway namespace
-  // inherits the ambiguity. Not overridable — there is no honest reason to declare both. Built-ins
-  // join the check because the reserved-prefix rule is case-sensitive (`Capsule_info` is legal).
-  // Names are `[a-zA-Z0-9_-]{1,64}` per schema, so the reported pair is safe to interpolate.
-  try {
-    assertNoToolNameCollision([
-      ...loaded.manifest.tools.map((tool) => tool.name),
-      ...BUILTIN_TOOLS.map((tool) => tool.name),
-    ]);
-  } catch (err) {
-    const detail = err instanceof CapsuleError ? err.message : String(err);
-    const text =
-      `Security Alert (Confusable Tool Names): Capsule '${loaded.manifest.meta.name}' declares two tool ` +
-      `names that read as the same name (${detail}). Installation refused.`;
-    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-  }
-
-  // Screen for suspicious prompt injection markers or identifiers
-  const screeningWarnings: string[] = [];
-  buildToolList(loaded.manifest, {
-    allowSuspicious: false,
-    warn: (line) => screeningWarnings.push(line),
+  return installLoadedCapsule(loaded, opts, {
+    allowSuspicious,
+    actionWord: "Installed",
+    targetFile,
   });
-
-  const metaMarkers = scanTextTree([loaded.manifest.meta.title, loaded.manifest.meta.description]);
-  if (metaMarkers.length > 0) {
-    screeningWarnings.push(`metadata: ${metaMarkers.join(", ")}`);
-  }
-
-  if (screeningWarnings.length > 0 && !allowSuspicious) {
-    const text =
-      `Security Warning (Suspicious Content): Capsule contains suspicious patterns or prompt injection markers (${screeningWarnings.join("; ")}). ` +
-      `To install anyway, re-run capsule_install with { path: "${targetFile}", allow_suspicious: true }.`;
-    return {
-      text,
-      structured: { ok: false, error: "E_SUSPICIOUS", findings: screeningWarnings, message: text },
-      isError: true,
-    };
-  }
-
-  const destPath = installedCapsulePath(loaded.capsuleId, opts.homeDir);
-  mkdirSync(dirname(destPath), { recursive: true });
-  writeFileSync(destPath, loaded.bytes);
-
-  addInstalledCapsule(
-    loaded.capsuleId,
-    {
-      name: loaded.manifest.meta.name,
-      version: loaded.manifest.meta.version,
-      file: destPath,
-      installedAt: new Date().toISOString(),
-      ...(allowSuspicious ? { allowSuspicious: true } : {}),
-    },
-    opts.homeDir,
-  );
-
-  opts.invalidateCache();
-  opts.notifyListChanged();
-
-  const caps = declaredCapabilities(loaded.manifest);
-  // Read back from the gateway rather than from this manifest: a capsule whose names collide with one
-  // already installed is suppressed there, and a summary that named tools nobody can call would send
-  // the agent looking for them.
-  const gatewayTools = await opts.servedTools(loaded.capsuleId);
-  const text =
-    `Installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.\n` +
-    `• Capsule ID: ${loaded.capsuleId}\n` +
-    `• Publisher Key: ${loaded.keyId}\n` +
-    `• Trust State: ${loaded.trust}\n` +
-    `• Declared Capabilities: ${caps}\n` +
-    `• Exposed Tools: ${gatewayTools.length > 0 ? gatewayTools.join(", ") : "none"}` +
-    (gatewayTools.length === 0
-      ? `\n• Warning: no tools are exposed — its tool names collide with an already installed capsule, ` +
-        `so this capsule is suppressed. Uninstall the other capsule to use this one.`
-      : "");
-
-  return {
-    text,
-    structured: {
-      ok: true,
-      capsuleId: loaded.capsuleId,
-      name: loaded.manifest.meta.name,
-      version: loaded.manifest.meta.version,
-      keyId: loaded.keyId,
-      trust: loaded.trust,
-      capabilities: caps,
-      tools: gatewayTools,
-      message: text,
-    },
-    isError: false,
-  };
 }
 
 export function handleCapsuleUninstall(

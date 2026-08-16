@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { exportMcpb } from "../../commands/export-mcpb.ts";
+import { join } from "node:path";
 import type { ConformanceReport, ConformanceResult } from "../../conformance/checks.ts";
 import { runConformance } from "../../conformance/run.ts";
 import { asRecord } from "../../core/canonical.ts";
@@ -10,18 +9,15 @@ import { parseManifest, type EffectName, type Manifest, type ManifestTool } from
 import { homeSidecarPaths, invokeTool } from "../../runtime/invoke.ts";
 import { openJournal } from "../../runtime/journal.ts";
 import { capsuleHome } from "../../security/signing.ts";
-import { BUILTIN_TOOLS } from "../builtin.ts";
-import { assertNoToolNameCollision, type CatalogTool } from "../catalog.ts";
 import { JSON_RPC_ERROR, RpcFailure } from "../transport.ts";
 import {
-  addInstalledCapsule,
   installedCapsulePath,
-  installedCapsulesDir,
   loadInstalledStore,
 } from "./registry.ts";
 import {
   AUTHORING_TOOLS,
   GATEWAY_NAME_PATTERN,
+  installLoadedCapsule,
   type ToolExecutionResult,
 } from "./tools.ts";
 
@@ -251,19 +247,7 @@ async function executeAuthoringPipeline(
     });
   }
 
-  // 2. Guardrail: Confusable Tool Names Collision
-  try {
-    assertNoToolNameCollision([
-      ...tools.map((t) => t.name),
-      ...BUILTIN_TOOLS.map((t) => t.name),
-    ]);
-  } catch (err) {
-    const detail = err instanceof CapsuleError ? err.message : String(err);
-    const text = `Security Alert (Confusable Tool Names): ${detail}. Creation refused.`;
-    return { text, structured: { ok: false, error: "E_CONTENT", message: text }, isError: true };
-  }
-
-  // 3. Guardrail: Capabilities and Network Egress
+  // 2. Guardrail: Capabilities and Network Egress
   const explicitCaps = asRecord(args["capabilities"]);
   const rawCaps = explicitCaps ?? existingManifest?.capabilities;
   const sqlCap =
@@ -447,62 +431,14 @@ async function executeAuthoringPipeline(
     };
   }
 
-  // Install into manager registry
-  const destPath = installedCapsulePath(loaded.capsuleId, opts.homeDir);
-  mkdirSync(dirname(destPath), { recursive: true });
-  writeFileSync(destPath, loaded.bytes);
-
-  addInstalledCapsule(
-    loaded.capsuleId,
-    {
-      name: loaded.manifest.meta.name,
-      version: loaded.manifest.meta.version,
-      file: destPath,
-      installedAt: new Date().toISOString(),
-    },
-    opts.homeDir,
-  );
-
-  opts.invalidateCache();
-  opts.notifyListChanged();
-
-  // Export .mcpb beside the .capsule
-  let mcpbFile: string | undefined;
-  try {
-    const mcpbDest = join(
-      installedCapsulesDir(opts.homeDir),
-      `${loaded.manifest.meta.name}-${loaded.manifest.meta.version}.mcpb`,
-    );
-    mcpbFile = await exportMcpb(destPath, mcpbDest);
-  } catch (err) {
-    opts.warn(`Warning: failed to export .mcpb bundle: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const gatewayTools = await opts.servedTools(loaded.capsuleId);
-  const actionWord = isUpdate ? "Updated" : "Created";
-  const text =
-    `${actionWord} and installed capsule '${loaded.manifest.meta.name}@${loaded.manifest.meta.version}' successfully.\n` +
-    `• Capsule ID: ${loaded.capsuleId}\n` +
-    `• File: ${destPath}\n` +
-    (mcpbFile ? `• MCPB Bundle: ${mcpbFile}\n` : "") +
-    `• Exposed Tools: ${gatewayTools.length > 0 ? gatewayTools.join(", ") : "none"}\n` +
-    `• Share: Send the .mcpb file (or .capsule) — recipients can double-click it to install.`;
-
-  return {
-    text,
-    structured: {
-      ok: true,
-      capsuleId: loaded.capsuleId,
-      name: loaded.manifest.meta.name,
-      version: loaded.manifest.meta.version,
-      file: destPath,
-      ...(mcpbFile ? { mcpb_file: mcpbFile } : {}),
-      tools: gatewayTools,
-      share_hint: "Send the .mcpb file (or .capsule) — recipients can double-click it to install.",
-      message: text,
-    },
-    isError: false,
-  };
+  // Install into manager registry via the shared P2-2 install pipeline
+  const allowSuspicious = args["allow_suspicious"] === true;
+  return installLoadedCapsule(loaded, opts, {
+    allowSuspicious,
+    actionWord: isUpdate ? "Updated" : "Created",
+    exportMcpb: true,
+    shareHint: "Send the .mcpb file (or .capsule) — recipients can double-click it to install.",
+  });
 }
 
 export async function handleCapsuleTestTool(

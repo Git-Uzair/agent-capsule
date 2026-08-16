@@ -145,7 +145,8 @@ Attempt ledger:
 - P2-3 attempt 2: pass legacySession based on clientElicitation, reuse handleToolsCall E_CONSENT, convert unresolved INPUT_REQUIRED to E_POLICY, add timeoutMs to transport.request -> FAIL (DUPLICATION of createResultBuilder envelope and policy denial text formatting)
 - P2-3 attempt 3: export formatPolicyDenial from src/mcp/call.ts, construct terminal refusal with createResultBuilder(ctx.resultMeta), truth-preserving refusal reasons -> FAIL (fabricated decline masking unresolved timeouts/errors, call.ts deny _meta missing grants/identity, legacySession sentence on 2026-07-28 sessions)
 - P2-3 attempt 5: add explicit {action: "cancel"} test in tests/manager-elicitation.test.ts -> PASS (P2-3 verified)
-- P2-4 attempt 1: implement capsule_create, capsule_update, capsule_test_tool in authoring.ts -> PASS (P2-4 verified with 9 comprehensive tests covering authoring lifecycle, guardrails, conformance rejection, and stdio purity)
+- P2-4 attempt 1: initial authoring implementation -> FAIL (missing suspicious text screening on create, duplicated install pipeline logic, conditional test assertion on mcpb_file)
+- P2-4 attempt 2: deduplicate install pipeline into installLoadedCapsule with prompt injection screening, confusable checks, and capabilities/keyId/trust reporting, ensure dist built and assert mcpb_file unconditionally -> PASS (P2-4 verified)
 
 
 
