@@ -13,6 +13,7 @@ import { mcpCommand } from "./commands/mcp.ts";
 import { packCommand } from "./commands/pack.ts";
 import { replayCommand } from "./commands/replay.ts";
 import { runCommand } from "./commands/run.ts";
+import { shareCommand } from "./commands/share.ts";
 import { uiCommand } from "./commands/ui.ts";
 import { verifyCommand } from "./commands/verify.ts";
 
@@ -32,6 +33,7 @@ const COMMANDS = new Map<string, Command>([
   ["build-manager-mcpb", buildManagerMcpbCommand],
   ["export-plugin", exportPluginCommand],
   ["export-mcpb", exportMcpbCommand],
+  ["share", shareCommand],
 ]);
 
 const USAGE = `usage: capsule <command> [options]

@@ -577,16 +577,59 @@ test("an idle server shuts itself down", async () => {
   });
 });
 
-test("a capsule with no local page is refused before the port is bound", async () => {
+test("a capsule with no local page serves the installer discovery page", async () => {
   await withHome(async (home) => {
     const capsule = await packCapsule(home, (draft) => {
       draft.meta.name = "hello-no-ui";
       delete draft.ui;
       for (const tool of draft.tools) delete tool.ui;
     });
-    await assert.rejects(
-      () => startUiServer({ capsule, homeDir: home }),
-      (err: unknown) => err instanceof Error && /does not declare a ui/.test(err.message),
-    );
+    const ui = await startUiServer({ capsule, homeDir: home });
+    try {
+      const res = await raw({ port: ui.port, path: `/?t=${ui.token}` });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers["content-type"], "text/html; charset=utf-8");
+      assert.ok(res.body.includes("hello-no-ui"));
+      assert.ok(res.body.includes("Capsule Identity &amp; Trust"));
+      assert.ok(res.body.includes("Client Installation &amp; Sharing"));
+      assert.ok(res.body.includes("Cursor"));
+      assert.ok(res.body.includes("VS Code"));
+      assert.ok(res.body.includes("cursor://anysphere.cursor-deeplink/mcp/install?"));
+      assert.ok(res.body.includes("vscode:mcp/install?"));
+      assert.ok(res.body.includes("npx -y agent-capsule mcp"));
+      assert.ok(res.body.includes("Declared Capabilities"));
+      assert.ok(res.body.includes("greet"));
+
+      // Also accessible at /installer
+      const installerRes = await raw({ port: ui.port, path: `/installer?t=${ui.token}` });
+      assert.equal(installerRes.status, 200);
+      assert.equal(installerRes.headers["content-type"], "text/html; charset=utf-8");
+      assert.equal(installerRes.body, res.body);
+    } finally {
+      await ui.close();
+    }
+  });
+});
+
+test("a capsule with local page also serves the installer page at /installer", async () => {
+  await withHome(async (home) => {
+    const capsule = await packCapsule(home);
+    const ui = await startUiServer({ capsule, homeDir: home });
+    try {
+      // Root serves the guest UI
+      const rootRes = await raw({ port: ui.port, path: `/?t=${ui.token}` });
+      assert.equal(rootRes.status, 200);
+      assert.equal(rootRes.body, PAGE);
+
+      // /installer serves the installer page
+      const installerRes = await raw({ port: ui.port, path: `/installer?t=${ui.token}` });
+      assert.equal(installerRes.status, 200);
+      assert.equal(installerRes.headers["content-type"], "text/html; charset=utf-8");
+      assert.ok(installerRes.body.includes("Capsule Identity &amp; Trust"));
+      assert.ok(installerRes.body.includes("Client Installation &amp; Sharing"));
+      assert.ok(installerRes.body.includes("cursor://anysphere.cursor-deeplink/mcp/install?"));
+    } finally {
+      await ui.close();
+    }
   });
 });

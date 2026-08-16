@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { buildSharePayload } from "../commands/share.ts";
 import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
 import type { LoadedCapsule } from "../format/capsule.ts";
@@ -169,6 +170,294 @@ function tokenMatches(presented: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+export function renderInstallerHtml(capsule: LoadedCapsule): string {
+  const manifest = capsule.manifest;
+  const share = buildSharePayload(capsule, capsule.file);
+  const title = manifest.meta.title || manifest.meta.name;
+  const description = manifest.meta.description || "";
+  const netHosts = manifest.capabilities?.net?.allowed_hosts?.length
+    ? manifest.capabilities.net.allowed_hosts.join(", ")
+    : manifest.capabilities?.net?.allow_localhost
+      ? "localhost only"
+      : "None";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)} - Agent Capsule</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #38bdf8;
+      --primary-hover: #0ea5e9;
+      --code-bg: #0b1120;
+      --badge-bg: #334155;
+      --badge-text: #e2e8f0;
+      --success: #22c55e;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --card-bg: #ffffff;
+        --border: #e2e8f0;
+        --text: #0f172a;
+        --text-muted: #64748b;
+        --primary: #0284c7;
+        --primary-hover: #0369a1;
+        --code-bg: #f1f5f9;
+        --badge-bg: #e2e8f0;
+        --badge-text: #334155;
+        --success: #16a34a;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 2rem 1rem;
+    }
+    .container { max-width: 800px; margin: 0 auto; }
+    header { margin-bottom: 2rem; }
+    h1 { font-size: 1.875rem; font-weight: 700; display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+    .version { font-size: 1rem; font-weight: normal; color: var(--text-muted); }
+    .description { margin-top: 0.5rem; color: var(--text-muted); font-size: 1.125rem; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .card h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; }
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+    .meta-item { display: flex; flex-direction: column; gap: 0.25rem; }
+    .meta-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .meta-value { font-family: monospace; font-size: 0.875rem; word-break: break-all; }
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      background: var(--badge-bg);
+      color: var(--badge-text);
+    }
+    .badge-success { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+    .tools-list { display: flex; flex-direction: column; gap: 1rem; }
+    .tool-item {
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 1rem;
+      background: var(--bg);
+    }
+    .tool-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem; }
+    .tool-name { font-family: monospace; font-weight: 600; color: var(--primary); }
+    .tool-effects { display: flex; gap: 0.375rem; flex-wrap: wrap; }
+    .install-tabs { display: flex; flex-direction: column; gap: 1rem; }
+    .install-option {
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 1.25rem;
+      background: var(--bg);
+    }
+    .install-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem; }
+    .install-title { font-weight: 600; font-size: 1rem; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.5rem 1rem;
+      border-radius: 0.375rem;
+      font-weight: 500;
+      font-size: 0.875rem;
+      cursor: pointer;
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: all 0.15s;
+    }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary { background: var(--card-bg); border-color: var(--border); color: var(--text); }
+    .btn-secondary:hover { background: var(--border); }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.375rem;
+      padding: 0.75rem 1rem;
+      font-family: monospace;
+      font-size: 0.8125rem;
+      overflow-x: auto;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>
+        ${escapeHtml(title)}
+        <span class="version">v${escapeHtml(manifest.meta.version)}</span>
+      </h1>
+      ${description ? `<p class="description">${escapeHtml(description)}</p>` : ""}
+    </header>
+
+    <div class="card">
+      <h2>Capsule Identity &amp; Trust</h2>
+      <div class="meta-grid">
+        <div class="meta-item">
+          <span class="meta-label">Capsule ID</span>
+          <span class="meta-value">${escapeHtml(capsule.capsuleId)}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Publisher Key ID</span>
+          <span class="meta-value">${escapeHtml(capsule.keyId)}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Trust Status</span>
+          <span class="meta-value"><span class="badge badge-success">${escapeHtml(capsule.trust ?? "unpinned")}</span></span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Capsule File</span>
+          <span class="meta-value">${escapeHtml(share.file)}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Client Installation &amp; Sharing</h2>
+      <div class="install-tabs">
+        <div class="install-option">
+          <div class="install-header">
+            <span class="install-title">Claude Desktop (.mcpb)</span>
+            ${share.mcpb_file ? `<span class="badge badge-success">Ready</span>` : ""}
+          </div>
+          ${
+            share.mcpb_file
+              ? `<p style="color:var(--text-muted);font-size:0.875rem">Double-click the .mcpb bundle on your machine:</p><pre><code>${escapeHtml(share.mcpb_file)}</code></pre>`
+              : `<p style="color:var(--text-muted);font-size:0.875rem">Export as a double-clickable bundle using:</p><pre><code>capsule export-mcpb "${escapeHtml(share.file)}"</code></pre>`
+          }
+        </div>
+
+        <div class="install-option">
+          <div class="install-header">
+            <span class="install-title">Cursor</span>
+            <div style="display:flex;gap:0.5rem">
+              <a href="${escapeHtml(share.cursor_deeplink)}" class="btn btn-primary">Install in Cursor</a>
+              <button class="btn btn-secondary" data-snippet="${escapeHtml(share.cursor_deeplink)}" onclick="copySnippet(this)">Copy Link</button>
+            </div>
+          </div>
+          <pre><code>${escapeHtml(share.cursor_deeplink)}</code></pre>
+        </div>
+
+        <div class="install-option">
+          <div class="install-header">
+            <span class="install-title">VS Code</span>
+            <div style="display:flex;gap:0.5rem">
+              <a href="${escapeHtml(share.vscode_deeplink)}" class="btn btn-primary">Install in VS Code</a>
+              <button class="btn btn-secondary" data-snippet="${escapeHtml(share.vscode_deeplink)}" onclick="copySnippet(this)">Copy Link</button>
+            </div>
+          </div>
+          <pre><code>${escapeHtml(share.vscode_deeplink)}</code></pre>
+        </div>
+
+        <div class="install-option">
+          <div class="install-header">
+            <span class="install-title">Claude Code / Terminal (npx)</span>
+            <button class="btn btn-secondary" data-snippet="${escapeHtml(share.npx_command)}" onclick="copySnippet(this)">Copy Command</button>
+          </div>
+          <pre><code>${escapeHtml(share.npx_command)}</code></pre>
+        </div>
+
+        <div class="install-option">
+          <div class="install-header">
+            <span class="install-title">Generic MCP Client (mcpServers JSON)</span>
+            <button class="btn btn-secondary" onclick="copySnippet(this)">Copy JSON</button>
+          </div>
+          <pre><code>${escapeHtml(JSON.stringify(share.mcp_servers_config, null, 2))}</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Declared Capabilities</h2>
+      <div class="meta-grid">
+        <div class="meta-item">
+          <span class="meta-label">KV Storage</span>
+          <span class="meta-value">${manifest.capabilities?.kv ? "Enabled" : "Disabled"}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">SQL Database</span>
+          <span class="meta-value">${manifest.capabilities?.sql ? "Enabled" : "Disabled"}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Package Export</span>
+          <span class="meta-value">${manifest.capabilities?.pack ? "Enabled" : "Disabled"}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Network Egress</span>
+          <span class="meta-value">${escapeHtml(netHosts)}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tools (${manifest.tools.length})</h2>
+      <div class="tools-list">
+        ${manifest.tools
+          .map(
+            (tool) => `
+          <div class="tool-item">
+            <div class="tool-header">
+              <span class="tool-name">${escapeHtml(tool.name)}</span>
+              <div class="tool-effects">
+                ${(tool.effects || []).map((eff) => `<span class="badge">${escapeHtml(eff)}</span>`).join(" ")}
+              </div>
+            </div>
+            ${tool.description ? `<p style="color:var(--text-muted);font-size:0.875rem">${escapeHtml(tool.description)}</p>` : ""}
+          </div>
+        `,
+          )
+          .join("")}
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function copySnippet(btn) {
+      var text = btn.getAttribute("data-snippet");
+      if (!text) {
+        var target = btn.closest(".install-option").querySelector("pre code");
+        text = target ? target.innerText : "";
+      }
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = btn.innerText;
+        btn.innerText = "Copied!";
+        setTimeout(function() { btn.innerText = orig; }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>`;
+}
+
 /**
  * A loopback HTTP server for the capsule's own page, and the only component of this system a browser
  * can reach. Three things keep it from being an authority anybody else can borrow:
@@ -179,11 +468,9 @@ function tokenMatches(presented: string, expected: string): boolean {
  *    — the browser resolving the attacker's own domain to `127.0.0.1` and carrying the token for
  *    them — arrives with the attacker's hostname in it and is refused.
  *
- * The page itself is served byte-for-byte out of the signed container. Nothing is injected into it:
- * the bytes the browser renders are the bytes the statement digest covers, so the page's own
- * bootstrap reads the token out of `location.search` and calls `/rpc` with it. Assets under `/ui/`
- * need the token too, which is why a page that loads its own script asks for it as
- * `/ui/app.js?t=<token>` rather than with a bare `<script src>`.
+ * The page itself is served byte-for-byte out of the signed container when a UI page is declared.
+ * When no guest UI page is declared, it serves a standalone discovery and installer page with
+ * client connection snippets.
  */
 export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   const { capsule } = opts;
@@ -195,13 +482,9 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
     });
 
   // The local page is `ui.local.path` when the manifest names one, and the MCP App's page otherwise:
-  // one capsule, one UI, served two ways.
+  // one capsule, one UI, served two ways. If none is declared, the installer discovery page is served.
   const pagePath = manifest.ui?.local?.path ?? manifest.ui?.app?.path;
-  if (pagePath === undefined) {
-    throw new CapsuleError("E_MANIFEST", "capsule does not declare a ui page to serve (ui.local.path)", {
-      file: capsule.file,
-    });
-  }
+  const hasGuestUi = pagePath !== undefined;
 
   // Refused here rather than on first request, and before a port exists: a capsule whose tool list
   // cannot be shown safely must not be reachable at all. The names a human reads in a browser are
@@ -216,20 +499,35 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
   );
   const served = new Set(tools.map((tool) => tool.name));
 
-  const page = await capsule.reader.read(pagePath);
+  const installerHtml = renderInstallerHtml(capsule);
+  const installerBuffer = Buffer.from(installerHtml, "utf8");
+
+  let pageBuffer: Buffer;
+  let guestPageCsp: string;
+  const installerCsp = contentSecurityPolicy(installerHtml, []);
+
   const connectDomains = (manifest.ui?.app?.csp?.connectDomains ?? []).filter((domain) => {
     if (CSP_SOURCE.test(domain)) return true;
     warn("ui: ignoring an unusable connect-src source in capsule.json");
     return false;
   });
-  const csp = contentSecurityPolicy(page.toString("utf8"), connectDomains);
+
+  if (hasGuestUi && pagePath) {
+    const rawPage = await capsule.reader.read(pagePath);
+    pageBuffer = rawPage;
+    guestPageCsp = contentSecurityPolicy(rawPage.toString("utf8"), connectDomains);
+  } else {
+    pageBuffer = installerBuffer;
+    guestPageCsp = installerCsp;
+  }
+
   const toolsBody = Buffer.from(JSON.stringify({ tools }), "utf8");
 
   const token = opts.token ?? randomBytes(TOKEN_BYTES).toString("hex");
   const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_MS;
 
   const securityHeaders: Record<string, string> = {
-    "content-security-policy": csp,
+    "content-security-policy": guestPageCsp,
     "x-content-type-options": "nosniff",
     // Redundant beside `frame-ancestors 'none'` and free: the two are read by different browsers.
     "x-frame-options": "DENY",
@@ -499,7 +797,12 @@ export async function startUiServer(opts: UiServerOptions): Promise<UiServer> {
         switch (route) {
           case "GET /":
           case "GET /index.html":
-            return send(res, 200, "text/html; charset=utf-8", page);
+            return send(res, 200, "text/html; charset=utf-8", pageBuffer);
+          case "GET /installer":
+          case "GET /installer.html":
+            return send(res, 200, "text/html; charset=utf-8", installerBuffer, {
+              "content-security-policy": installerCsp,
+            });
           case "GET /api/tools":
             return send(res, 200, "application/json", toolsBody);
           case "POST /rpc":
