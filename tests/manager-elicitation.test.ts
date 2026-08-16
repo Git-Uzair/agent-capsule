@@ -396,7 +396,7 @@ test("Manager elicitation: user answers 'deny' -> returns error result with E_PO
   });
 });
 
-test("Manager elicitation: client declines or cancels -> returns error result with E_POLICY", async () => {
+test("Manager elicitation: client declines -> returns error result with E_POLICY", async () => {
   await withHome(async (home, downloads) => {
     const capsulePath = await packNetCapsule(home, "netcap_decline");
 
@@ -454,6 +454,82 @@ test("Manager elicitation: client declines or cancels -> returns error result wi
       name: "capsule/netcap_decline",
       version: "1.0.0",
     });
+  });
+});
+
+test("Manager elicitation: client cancels -> returns error result with E_POLICY and no grant persisted", async () => {
+  await withHome(async (home, downloads) => {
+    const capsulePath = await packNetCapsule(home, "netcap_cancel");
+    let elicitationCount = 0;
+
+    const mock = createMockTransport({
+      onRequest: (method, _params) => {
+        if (method === ELICITATION_METHOD) {
+          elicitationCount += 1;
+          // A cancelled form is the third answer the specification allows, and it carries no content.
+          return { action: "cancel" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      },
+    });
+
+    const server = createManagerServer({ homeDir: home, downloadsDir: downloads });
+    server.serve(mock.transport);
+
+    await mock.deliver(
+      rpc("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: {} },
+      }),
+    );
+    await server.drain();
+
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "capsule_install",
+        arguments: { path: capsulePath },
+      }),
+    );
+    await server.drain();
+
+    const installMsg = mock.sent.find(
+      (m) => "result" in m && (m.result as { structuredContent?: { name?: string } }).structuredContent?.name === "netcap_cancel",
+    ) as { result: { structuredContent: { capsuleId: string } } };
+    assert.ok(installMsg);
+    const capsuleId = installMsg.result.structuredContent.capsuleId;
+
+    // Call netcap_cancel__pull
+    await mock.deliver(
+      rpc("tools/call", {
+        name: "netcap_cancel__pull",
+        arguments: {},
+      }),
+    );
+    await server.drain();
+
+    assert.equal(elicitationCount, 1);
+    const pullRes = mock.sent.filter((m) => "result" in m).at(-1) as {
+      result: {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        _meta?: { code?: string; grants?: string[]; [key: string]: unknown };
+      };
+    };
+    assert.ok(pullRes);
+    assert.equal(pullRes.result.isError, true);
+    assert.equal(pullRes.result._meta?.code, "E_POLICY");
+    // Cancelling is a refusal the user made, so it reads exactly as the decline does — never as an
+    // unresolved question, which would be false of an answer that did come back.
+    assert.equal(pullRes.result.content[0]?.text, `E_POLICY: user denied ${NET_GRANT}`);
+    assert.deepEqual(pullRes.result._meta?.grants, [NET_GRANT]);
+    assert.deepEqual(pullRes.result._meta?.[SERVER_INFO_META], {
+      name: "capsule/netcap_cancel",
+      version: "1.0.0",
+    });
+
+    // A refusal writes nothing: the grant store stays as empty as it started.
+    assert.equal(hasGrant(loadGrants(home), capsuleId, NET_GRANT), false);
+    assert.deepEqual(Object.keys(loadGrants(home).capsules), []);
   });
 });
 

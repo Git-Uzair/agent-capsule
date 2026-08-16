@@ -134,7 +134,7 @@ Attempt ledger:
 
 ### P2 — The Capsule Manager extension (the platform)
 Status: in_progress
-Failed verify cycles: 2 (on P2-3)
+Failed verify cycles: 4 (on P2-3)
 Attempt ledger:
 - P2-1/P2-2 attempt 1: initial P2-1/P2-2 implementation -> FAIL (routing on names with __, allow_suspicious persistence, re-install collision/supersede, trust on corrupt file, premature stub advertising, duplicate injection scan)
 - P2-1/P2-2 attempt 2: prefix matching for names with __, allowSuspicious persistence in installed.json and catalog build/call, replace older same-name entries on install, report trust corrupt on unreadable capsule, only advertise implemented tools, reuse buildToolList for injection scan -> FAIL (intra-capsule confusable collision, capsuleId mismatch on file swap, from_downloads vs path precedence, global allowSuspicious in capsule_list)
@@ -143,6 +143,10 @@ Attempt ledger:
 - P2-1/P2-2 attempt 5: use bound result builder in handleToolsCallGateway, enforce GATEWAY_NAME_PATTERN ^[a-zA-Z0-9_-]{1,64}$ at install and gateway build -> PASS (P2-1/P2-2 core verified)
 - P2-3 attempt 1: initial elicitation implementation -> FAIL (raw INPUT_REQUIRED on invalid decision, missing timeoutMs on transport.request, duplicate E_CONSENT text builder)
 - P2-3 attempt 2: pass legacySession based on clientElicitation, reuse handleToolsCall E_CONSENT, convert unresolved INPUT_REQUIRED to E_POLICY, add timeoutMs to transport.request -> FAIL (DUPLICATION of createResultBuilder envelope and policy denial text formatting)
+- P2-3 attempt 3: export formatPolicyDenial from src/mcp/call.ts, construct terminal refusal with createResultBuilder(ctx.resultMeta), truth-preserving refusal reasons -> FAIL (fabricated decline masking unresolved timeouts/errors, call.ts deny _meta missing grants/identity, legacySession sentence on 2026-07-28 sessions)
+- P2-3 attempt 4: policyRefusal helper for all denial and unresolved refusals, omit unusable answers, native MRTR passthrough on 2026-07-28 non-elicitation sessions -> FAIL (missing explicit {action: "cancel"} test in tests/manager-elicitation.test.ts)
+
+
 
 
 **P2-1. Manager server core.**
