@@ -357,6 +357,14 @@ describe("capsule export-mcpb", () => {
       assert.equal(missingRes.status, 1);
       assert.match(missingRes.stderr, /^E_USAGE: /);
 
+      const emptyOutRes = spawnSync(process.execPath, [CLI, "export-mcpb", capsule.file, "-o", ""], {
+        cwd: home,
+        encoding: "utf8",
+        env: { ...process.env, CAPSULE_HOME: home },
+      });
+      assert.equal(emptyOutRes.status, 1);
+      assert.match(emptyOutRes.stderr, /^E_USAGE: -o needs a non-empty value/);
+
       const notFoundRes = spawnSync(process.execPath, [CLI, "export-mcpb", "nonexistent.capsule"], {
         cwd: home,
         encoding: "utf8",
@@ -364,6 +372,14 @@ describe("capsule export-mcpb", () => {
       });
       assert.equal(notFoundRes.status, 1);
       assert.match(notFoundRes.stderr, /^E_USAGE: /);
+
+      await assert.rejects(
+        async () => await exportMcpb(capsule.file, ""),
+        (err: unknown) => {
+          assert.equal((err as { code: string }).code, "E_USAGE");
+          return true;
+        },
+      );
     });
   });
 });

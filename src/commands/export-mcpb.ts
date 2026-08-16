@@ -25,6 +25,9 @@ export async function exportMcpb(
   outPath?: string,
   opts?: { distDir?: string; iconPath?: string },
 ): Promise<string> {
+  if (outPath !== undefined && outPath.trim() === "") {
+    throw new CapsuleError("E_USAGE", "-o needs a non-empty value");
+  }
   if (!existsSync(capsulePath)) {
     throw new CapsuleError("E_USAGE", "capsule file does not exist", { path: capsulePath });
   }
@@ -124,8 +127,15 @@ export async function runExportMcpb(argv: string[]): Promise<number> {
   let file: string | undefined;
   let out: string | undefined;
 
-  const valueOf = (arg: string, next: string | undefined): string =>
-    next === undefined ? usage(`${arg} needs a value`) : next;
+  const valueOf = (arg: string, next: string | undefined): string => {
+    if (next === undefined) {
+      usage(`${arg} needs a value`);
+    }
+    if (next.trim() === "") {
+      usage(`${arg} needs a non-empty value`);
+    }
+    return next;
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;

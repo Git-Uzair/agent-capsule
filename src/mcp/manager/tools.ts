@@ -59,7 +59,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         source: {
           type: "string",
           description:
-            "Guest JavaScript source code (ESM/CJS). Must define handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Can use guest runtime APIs like `capsule.kv`, `capsule.sql`, and `fetch` if declared in capabilities.",
+            "Guest JavaScript source code evaluated in the QuickJS sandbox. Must define tool handlers on `globalThis.tools` (e.g. `globalThis.tools = { my_tool(args) { return { result: 'ok' }; } }`). Sandboxed runtime APIs are available on `globalThis.capsule`: `capsule.fetch(url, init)` (when net capability is declared), `capsule.kv.get(key)` / `capsule.kv.set(key, val)` (when kv enabled), `capsule.sql.query(sql, params)` / `capsule.sql.exec(sql, params)` (when sql enabled), and `capsule.log(message)`.",
         },
         tools: {
           type: "array",
@@ -102,15 +102,15 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
           properties: {
             kv: {
               type: "boolean",
-              description: "Enable persistent key-value storage (`capsule.kv.get/set/delete/list`).",
+              description: "Enable persistent key-value storage (`capsule.kv.get(key)`, `capsule.kv.set(key, val)`).",
             },
             sql: {
               type: "boolean",
-              description: "Enable persistent SQLite storage (`capsule.sql.query/exec`).",
+              description: "Enable persistent SQLite storage (`capsule.sql.query(sql, params)`, `capsule.sql.exec(sql, params)`).",
             },
             net: {
               type: "object",
-              description: "Network egress capability configuration.",
+              description: "Network egress capability configuration for `capsule.fetch`.",
               properties: {
                 allowed_hosts: {
                   type: "array",
@@ -170,7 +170,7 @@ export const AUTHORING_TOOLS: readonly CatalogTool[] = [
         },
         source: {
           type: "string",
-          description: "Updated guest JavaScript source code defining globalThis.tools.",
+          description: "Updated guest JavaScript source code evaluated in the QuickJS sandbox defining `globalThis.tools`.",
         },
         tools: {
           type: "array",

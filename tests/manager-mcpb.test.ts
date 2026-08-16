@@ -200,7 +200,15 @@ describe("capsule build-manager-mcpb", () => {
       });
 
       assert.equal(listRes.id, 2);
-      const tools = listRes.result["tools"] as Array<{ name: string; description: string }>;
+      type ToolItem = {
+        name: string;
+        title?: string;
+        description: string;
+        inputSchema?: {
+          properties?: Record<string, { description?: string; properties?: Record<string, { description?: string }> }>;
+        };
+      };
+      const tools = listRes.result["tools"] as ToolItem[];
       const toolNames = tools.map((t) => t.name);
 
       const expectedTools = [
@@ -212,6 +220,63 @@ describe("capsule build-manager-mcpb", () => {
         "capsule_test_tool",
       ];
       assert.deepEqual(toolNames, expectedTools);
+
+      // Verify all tools have non-empty titles and descriptions
+      for (const t of tools) {
+        assert.ok(typeof t.title === "string" && t.title.length > 0, `Tool ${t.name} missing title`);
+        assert.ok(typeof t.description === "string" && t.description.length > 0, `Tool ${t.name} missing description`);
+      }
+
+      // Verify capsule_create description and accurate guest ABI instructions in schemas
+      const createTool = tools.find((t) => t.name === "capsule_create")!;
+      assert.ok(createTool.description.includes("brand-new Agent Capsule"));
+      assert.ok(createTool.description.includes("conformance"));
+      const createSourceDesc = createTool.inputSchema?.properties?.["source"]?.description ?? "";
+      assert.ok(createSourceDesc.includes("QuickJS sandbox"), "source description must mention QuickJS sandbox");
+      assert.ok(createSourceDesc.includes("globalThis.tools"), "source description must mention globalThis.tools");
+      assert.ok(createSourceDesc.includes("globalThis.capsule"), "source description must mention globalThis.capsule");
+      assert.ok(createSourceDesc.includes("capsule.fetch"), "source description must mention capsule.fetch");
+      assert.ok(createSourceDesc.includes("capsule.kv.get(key)"), "source description must accurately cite capsule.kv.get(key)");
+      assert.ok(createSourceDesc.includes("capsule.kv.set(key, val)"), "source description must accurately cite capsule.kv.set(key, val)");
+      assert.ok(createSourceDesc.includes("capsule.sql.query"), "source description must cite capsule.sql.query");
+      assert.ok(createSourceDesc.includes("capsule.sql.exec"), "source description must cite capsule.sql.exec");
+      assert.ok(createSourceDesc.includes("capsule.log"), "source description must cite capsule.log");
+
+      const createKvDesc = createTool.inputSchema?.properties?.["capabilities"]?.properties?.["kv"]?.description ?? "";
+      assert.ok(createKvDesc.includes("capsule.kv.get(key)"), "kv capability description must mention capsule.kv.get(key)");
+      assert.ok(createKvDesc.includes("capsule.kv.set(key, val)"), "kv capability description must mention capsule.kv.set(key, val)");
+      assert.ok(!createKvDesc.includes("delete"), "kv capability description must not advertise delete (not in guest ABI)");
+      assert.ok(!createKvDesc.includes("list"), "kv capability description must not advertise list (not in guest ABI)");
+
+      const createSqlDesc = createTool.inputSchema?.properties?.["capabilities"]?.properties?.["sql"]?.description ?? "";
+      assert.ok(createSqlDesc.includes("capsule.sql.query"), "sql capability description must mention capsule.sql.query");
+      assert.ok(createSqlDesc.includes("capsule.sql.exec"), "sql capability description must mention capsule.sql.exec");
+
+      const createNetDesc = createTool.inputSchema?.properties?.["capabilities"]?.properties?.["net"]?.description ?? "";
+      assert.ok(createNetDesc.includes("capsule.fetch"), "net capability description must mention capsule.fetch");
+
+      // Verify capsule_update accurate guest ABI descriptions
+      const updateTool = tools.find((t) => t.name === "capsule_update")!;
+      assert.ok(updateTool.description.includes("Update an existing Agent Capsule"));
+      const updateSourceDesc = updateTool.inputSchema?.properties?.["source"]?.description ?? "";
+      assert.ok(updateSourceDesc.includes("QuickJS sandbox"));
+      assert.ok(updateSourceDesc.includes("globalThis.tools"));
+
+      // Verify capsule_install, capsule_uninstall, capsule_list, capsule_test_tool descriptions
+      const installTool = tools.find((t) => t.name === "capsule_install")!;
+      assert.ok(installTool.description.includes(".capsule"));
+      assert.ok(installTool.description.includes("Downloads"));
+
+      const uninstallTool = tools.find((t) => t.name === "capsule_uninstall")!;
+      assert.ok(uninstallTool.description.includes("capsuleId or name"));
+
+      const listTool = tools.find((t) => t.name === "capsule_list")!;
+      assert.ok(listTool.description.includes("publisher keys"));
+      assert.ok(listTool.description.includes("trust state"));
+
+      const testTool = tools.find((t) => t.name === "capsule_test_tool")!;
+      assert.ok(testTool.description.includes("sandboxed test invocation"));
+      assert.ok(testTool.description.includes("journaled effect count"));
     });
   });
 
@@ -256,6 +321,22 @@ describe("capsule build-manager-mcpb", () => {
       assert.equal(missingValRes.status, 1);
       assert.match(missingValRes.stderr, /^E_USAGE: -o needs a value/);
 
+      const emptyValRes = spawnSync(process.execPath, [CLI, "build-manager-mcpb", "-o", ""], {
+        cwd: home,
+        encoding: "utf8",
+        env: { ...process.env, CAPSULE_HOME: home },
+      });
+      assert.equal(emptyValRes.status, 1);
+      assert.match(emptyValRes.stderr, /^E_USAGE: -o needs a non-empty value/);
+
+      const emptyValRes2 = spawnSync(process.execPath, [CLI, "build-manager-mcpb", "--out", "   "], {
+        cwd: home,
+        encoding: "utf8",
+        env: { ...process.env, CAPSULE_HOME: home },
+      });
+      assert.equal(emptyValRes2.status, 1);
+      assert.match(emptyValRes2.stderr, /^E_USAGE: --out needs a non-empty value/);
+
       const unknownOptRes = spawnSync(process.execPath, [CLI, "build-manager-mcpb", "--unknown"], {
         cwd: home,
         encoding: "utf8",
@@ -272,9 +353,23 @@ describe("capsule build-manager-mcpb", () => {
       assert.equal(unexpRes.status, 1);
       assert.match(unexpRes.stderr, /^E_USAGE: unexpected argument: unexpected-arg/);
 
-      // 5. Direct runner function errors
+      // 5. Direct runner function and API errors
       await assert.rejects(
         async () => await runBuildManagerMcpb(["-o"]),
+        (err: unknown) => {
+          assert.equal((err as { code: string }).code, "E_USAGE");
+          return true;
+        },
+      );
+      await assert.rejects(
+        async () => await runBuildManagerMcpb(["-o", ""]),
+        (err: unknown) => {
+          assert.equal((err as { code: string }).code, "E_USAGE");
+          return true;
+        },
+      );
+      await assert.rejects(
+        async () => await buildManagerMcpb(""),
         (err: unknown) => {
           assert.equal((err as { code: string }).code, "E_USAGE");
           return true;

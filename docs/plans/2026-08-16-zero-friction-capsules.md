@@ -151,7 +151,8 @@ Attempt ledger:
 - P2-4 attempt 4: validate capsuleId and name agreement in capsule_update with InvalidParams, isolate version bump to matching entry -> FAIL (capsule_test_tool silently ignored name when capsuleId and name mismatched)
 - P2-4 attempt 5: validate capsuleId and name agreement in capsule_test_tool with InvalidParams -> FAIL (DUPLICATION unused duplicate ManagerPipelineOptions type declaration)
 - P2-4 attempt 6: delete unused ManagerPipelineOptions and unify manager option typing -> PASS (P2-4 verified)
-- P2-5 attempt 1: implement build-manager-mcpb command, path helpers, operating manual descriptions, and tests in tests/manager-mcpb.test.ts -> PASS (P2-5 verified)
+- P2-5 attempt 1: initial build-manager-mcpb implementation -> FAIL (inaccurate guest ABI in tool descriptions, empty -o path validation, EOF blank line in paths.ts, missing test coverage for description contents)
+- P2-5 attempt 2: fix guest ABI references in manager tool descriptions (capsule.fetch, capsule.kv.get/set, capsule.sql, QuickJS sandbox), validate empty -o path with E_USAGE in buildManagerMcpb and exportMcpb, strip trailing blank line in paths.ts, and add comprehensive assertions for manager tool descriptions, manifest descriptions, and empty -o path CLI/API rejections -> PASS (P2-5 verified)
 
 
 

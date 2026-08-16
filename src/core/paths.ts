@@ -59,4 +59,3 @@ export function getDefaultIconPath(customIconPath?: string): string {
 
   throw new CapsuleError("E_CONTAINER", "default icon.png not found");
 }
-
