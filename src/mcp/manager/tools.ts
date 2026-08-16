@@ -47,18 +47,27 @@ const AUTHORED_NAME_DESCRIPTION =
   `are refused. Its tools are served to the agent as '<name>__<toolName>'.`;
 
 /**
- * Every trust state a listed capsule can be reported in: `LoadedCapsule["trust"]` plus the two ways an
- * installed file can fail this host's own gates (src/mcp/manager/server.ts). `ListedCapsule["trust"]`
- * is this list, so a new state in either place has to be added here before it can be assigned — which
- * is what keeps `capsule_list`'s description from naming a state nothing produces.
+ * Every trust state a listing can report — which is not every state `LoadedCapsule["trust"]` has. The
+ * list is taken from the producer, `verifyInstalled` (src/mcp/manager/server.ts): it loads with the
+ * trust store live but deliberately without `acceptDrift`, so the loader can only hand it `pinned` or
+ * `ok`, and `corrupt`/`unverifiable` are the two ways that same function refuses the installed file.
+ * `drift-accepted` is absent on purpose: only `capsule_install`/`capsule_update` may re-pin a changed
+ * tool catalog, and only when the user said so (§6.2), so it can only ever be the trust state of
+ * *their* result — the re-pinned capsule reads as `ok` on every listing after it. It is `Exclude`d
+ * below so putting it back is a compile error, not a description that over-promises. `ListedCapsule["trust"]`
+ * is this list, so a state no listing produces cannot be assigned — which is what keeps `capsule_list`'s
+ * description from naming one.
  */
 export const LISTED_TRUST_STATES = [
   "pinned",
   "ok",
-  "drift-accepted",
   "corrupt",
   "unverifiable",
-] as const satisfies readonly (LoadedCapsule["trust"] | "corrupt" | "unverifiable")[];
+] as const satisfies readonly (
+  | Exclude<LoadedCapsule["trust"], "drift-accepted">
+  | "corrupt"
+  | "unverifiable"
+)[];
 
 /**
  * What a tool's `effects` list means, in the words a capsule author needs. Declaring an effect is not
@@ -358,12 +367,14 @@ export const MANAGER_TOOLS: readonly CatalogTool[] = [
     description:
       "List all installed Agent Capsules, their publisher keys, trust state, declared capabilities, and " +
       "exposed gateway tools ('<capsuleName>__<toolName>'). Every listing re-verifies the installed file " +
-      "against the trust store, and the trust state is one of: 'pinned' (this load pinned the name's " +
-      "publisher key and tool catalog), 'ok' (key and tool catalog match the pin), 'drift-accepted' (a " +
-      "changed tool catalog the user re-pinned by passing accept_drift to capsule_install), 'corrupt' (the " +
-      "file failed signature, digest or trust verification — a tool catalog that drifted from its pin " +
-      "reads as corrupt until accept_drift re-pins it), or 'unverifiable' (the file no longer matches the " +
-      "capsuleId it is pinned under). A corrupt or unverifiable capsule serves no tools.",
+      "against the trust store and never re-pins anything, so the trust state is one of exactly four: " +
+      "'pinned' (this load pinned the name's publisher key and tool catalog), 'ok' (key and tool catalog " +
+      "match the pin), 'corrupt' (the file failed signature, digest or trust verification — a tool catalog " +
+      "that no longer matches its pin reads as corrupt here until accept_drift re-pins it), or " +
+      "'unverifiable' (the file no longer matches the capsuleId it is pinned under). A corrupt or " +
+      "unverifiable capsule serves no tools. 'drift-accepted' is not a state a listing reports: it belongs " +
+      "to the capsule_install or capsule_update result that re-pinned a changed tool catalog, and that " +
+      "capsule reads as 'ok' on every listing after it.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -749,12 +760,22 @@ export type ListedCapsule = {
   file: string;
   installedAt: string;
   publisherKey: string;
-  /** `LoadedCapsule["trust"]`, or `corrupt`/`unverifiable` when the installed file failed its gates. */
+  /** One of `LISTED_TRUST_STATES`: `pinned`/`ok` from the loader, or how the installed file failed. */
   trust: (typeof LISTED_TRUST_STATES)[number];
   capabilities: string;
   tools: string[];
   note?: string;
 };
+
+/**
+ * The trust state a listing reports for a file that verified. A listing loads without `acceptDrift`
+ * (src/mcp/manager/server.ts), so `drift-accepted` cannot come back from that load; if it ever did,
+ * something re-pinned a changed tool catalog where §6.2 says only a user-approved install or update
+ * may, and the honest row for such bytes is `corrupt` — not a listing state this host does not have.
+ */
+export function listedTrust(trust: LoadedCapsule["trust"]): ListedCapsule["trust"] {
+  return trust === "drift-accepted" ? "corrupt" : trust;
+}
 
 /**
  * Formatting only. The rows come from the same pass that built `tools/list` and the dispatch table, so

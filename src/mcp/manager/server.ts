@@ -39,6 +39,7 @@ import {
   handleCapsuleInstall,
   handleCapsuleList,
   handleCapsuleUninstall,
+  listedTrust,
   MANAGER_TOOLS,
   type ListedCapsule,
   type ToolExecutionResult,
@@ -192,7 +193,7 @@ export function createManagerServer(opts: ManagerServerOptions = {}): ManagerMcp
         file: entry.file,
         installedAt: entry.installedAt,
         publisherKey: "unknown",
-        trust: typeof verified === "string" ? verified : verified.trust,
+        trust: typeof verified === "string" ? verified : listedTrust(verified.trust),
         capabilities: "unknown",
         tools: [],
       };

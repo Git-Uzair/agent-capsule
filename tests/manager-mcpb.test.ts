@@ -10,7 +10,7 @@ import { buildManagerMcpb, runBuildManagerMcpb } from "../src/commands/build-man
 import { getDefaultIconPath, getDistRuntimePaths } from "../src/core/paths.ts";
 import { installedCapsulePath } from "../src/mcp/manager/registry.ts";
 import { createManagerServer } from "../src/mcp/manager/server.ts";
-import { AUTHORED_NAME_PATTERN, LISTED_TRUST_STATES } from "../src/mcp/manager/tools.ts";
+import { AUTHORED_NAME_PATTERN, LISTED_TRUST_STATES, listedTrust } from "../src/mcp/manager/tools.ts";
 import type { JsonRpcRequest } from "../src/mcp/transport.ts";
 import { HOST_VERSION } from "../src/version.ts";
 
@@ -433,6 +433,29 @@ describe("capsule build-manager-mcpb", () => {
           `capsule_list description must name the trust state ${state}`,
         );
       }
+      // And 'drift-accepted' is not among them: verifyInstalled (src/mcp/manager/server.ts) loads
+      // without acceptDrift because only a user-approved install or update may re-pin (§6.2), so no
+      // listing can emit it. The description has to say where it is reported instead, and what the
+      // re-pinned capsule reads as here — the test below proves both against the running gateway.
+      assert.ok(
+        !(LISTED_TRUST_STATES as readonly string[]).includes("drift-accepted"),
+        "drift-accepted is not a state a listing produces, so it must not be a listed trust state",
+      );
+      assert.match(
+        listTool.description,
+        /'drift-accepted' is not a state a listing/,
+        "capsule_list description must say drift-accepted is not one of its own states",
+      );
+      assert.match(
+        listTool.description,
+        /capsule_install or capsule_update/,
+        "capsule_list description must say which result reports drift-accepted instead",
+      );
+      assert.match(
+        listTool.description,
+        /reads as 'ok' on every listing/,
+        "capsule_list description must say a re-pinned capsule reads as ok on the next listing",
+      );
       assert.ok(
         !/\bdrift\b(?!-)/.test(listTool.description),
         "capsule_list description must not name a bare 'drift' state — the real spelling is drift-accepted",
@@ -634,6 +657,133 @@ describe("capsule build-manager-mcpb", () => {
         warnings.some((line) => line.includes(`Failed to verify installed capsule ${capsuleId}`)),
         `the corrupt listing must report why the file was refused: ${warnings.join(" | ")}`,
       );
+    });
+  });
+
+  it("reaches every trust state capsule_list names, and reports a re-pinned capsule as ok", async () => {
+    await withHome(async (home) => {
+      const warnings: string[] = [];
+      const options = {
+        homeDir: home,
+        downloadsDir: join(home, "downloads"),
+        warn: (line: string) => warnings.push(line),
+      };
+      type ListRow = { capsuleId: string; trust: string; tools: string[]; note?: string };
+      type AuthorResult = {
+        isError: boolean;
+        content: Array<{ text: string }>;
+        structuredContent: { capsuleId: string; trust: string };
+      };
+      const seenStates = new Set<string>();
+
+      // One fresh server per listing: verifyInstalled caches a verified capsule for the life of the
+      // server, so re-verifying after the trust store or the installed bytes changed is what a new
+      // one does — the same thing a restarted client does.
+      const listRows = async (): Promise<ListRow[]> => {
+        const res = (await createManagerServer(options).handleMessage(toolCall("capsule_list", {}))) as {
+          result: { structuredContent: { capsules: ListRow[] } };
+        };
+        const rows = res.result.structuredContent.capsules;
+        for (const row of rows) {
+          assert.ok(
+            (LISTED_TRUST_STATES as readonly string[]).includes(row.trust),
+            `capsule_list reported an undescribed trust state: ${row.trust}`,
+          );
+          seenStates.add(row.trust);
+        }
+        return rows;
+      };
+      const rowFor = (rows: ListRow[], capsuleId: string): ListRow => {
+        const row = rows.find((candidate) => candidate.capsuleId === capsuleId);
+        assert.ok(row, `capsule_list did not report ${capsuleId}`);
+        return row;
+      };
+      const author = async (tool: string, args: Record<string, unknown>): Promise<AuthorResult> => {
+        const res = (await createManagerServer(options).handleMessage(toolCall(tool, args))) as {
+          result: AuthorResult;
+        };
+        assert.equal(res.result.isError, false, `${tool} failed: ${res.result.content[0]?.text}`);
+        return res.result;
+      };
+      const peek = { name: "peek", title: "Peek", description: "Returns ok.", inputSchema: { type: "object" } };
+      const poke = { name: "poke", title: "Poke", description: "Returns ok.", inputSchema: { type: "object" } };
+
+      const firstId = (
+        await author("capsule_create", {
+          name: "notes1",
+          title: "Notes",
+          description: "Peeks.",
+          source: "globalThis.tools = { peek() { return { ok: true }; } };",
+          tools: [peek],
+        })
+      ).structuredContent.capsuleId;
+
+      // 'pinned': with nothing pinned for this name, the listing's own verification *is* the
+      // trust-on-first-use that pins its publisher key and tool catalog.
+      rmSync(join(home, "trust.json"));
+      assert.equal(rowFor(await listRows(), firstId).trust, "pinned");
+
+      // 'ok': the pin the previous listing wrote is the pin this one matches.
+      const okRow = rowFor(await listRows(), firstId);
+      assert.equal(okRow.trust, "ok");
+      assert.ok(okRow.tools.includes("notes1__peek"), `capsule_list did not report notes1__peek: ${okRow.tools.join(", ")}`);
+
+      // 'drift-accepted' belongs to the update, not to any listing: the update that re-pins a changed
+      // tool catalog reports it once, and the next listing — which re-verifies and never re-pins
+      // (§6.2) — reports that same capsule as 'ok'.
+      const updated = await author("capsule_update", {
+        name: "notes1",
+        source: "globalThis.tools = { peek() { return { ok: true }; }, poke() { return { ok: true }; } };",
+        tools: [peek, poke],
+        accept_drift: true,
+      });
+      assert.equal(updated.structuredContent.trust, "drift-accepted");
+      const driftedId = updated.structuredContent.capsuleId;
+      assert.notEqual(driftedId, firstId);
+      const afterDrift = rowFor(await listRows(), driftedId);
+      assert.equal(afterDrift.trust, "ok", "a capsule whose re-pin was accepted reads as ok on the next listing");
+      assert.ok(afterDrift.tools.includes("notes1__poke"), `the re-pinned catalog is served: ${afterDrift.tools.join(", ")}`);
+
+      // 'unverifiable': the file under the pinned id is a valid, properly signed capsule — just not
+      // the one this registry row pins, so it may not borrow the trusted name.
+      const secondId = (
+        await author("capsule_create", {
+          name: "notes2",
+          title: "More Notes",
+          description: "Peeks too.",
+          source: "globalThis.tools = { peek() { return { ok: true }; } };",
+          tools: [peek],
+        })
+      ).structuredContent.capsuleId;
+      writeFileSync(installedCapsulePath(driftedId, home), readFileSync(installedCapsulePath(secondId, home)));
+      const swapped = rowFor(await listRows(), driftedId);
+      assert.equal(swapped.trust, "unverifiable");
+      assert.deepEqual(swapped.tools, [], "an unverifiable capsule serves no tools, as the description says");
+      assert.ok(
+        warnings.some((line) => line.includes(`Refusing installed capsule ${driftedId}`)),
+        `the unverifiable listing must report why the file was refused: ${warnings.join(" | ")}`,
+      );
+
+      // 'corrupt': bytes that are not a capsule at all.
+      writeFileSync(installedCapsulePath(secondId, home), Buffer.from("not a capsule"));
+      const brokenRows = await listRows();
+      assert.equal(rowFor(brokenRows, secondId).trust, "corrupt");
+      assert.deepEqual(rowFor(brokenRows, secondId).tools, []);
+      assert.equal(rowFor(brokenRows, driftedId).trust, "unverifiable");
+
+      // Bidirectional: every state the description names was reached by a real listing above, and no
+      // listing ever reported anything else.
+      assert.deepEqual(
+        [...seenStates].sort(),
+        [...LISTED_TRUST_STATES].sort(),
+        "capsule_list must be able to report exactly the states its description names",
+      );
+
+      // The boundary that keeps a row honest if a load in the listing path ever did re-pin: such bytes
+      // are reported as corrupt, never under a listing state this host does not have.
+      assert.equal(listedTrust("drift-accepted"), "corrupt");
+      assert.equal(listedTrust("pinned"), "pinned");
+      assert.equal(listedTrust("ok"), "ok");
     });
   });
 
