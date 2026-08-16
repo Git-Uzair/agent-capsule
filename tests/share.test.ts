@@ -53,33 +53,30 @@ describe("capsule share", () => {
       // npx_command
       assert.equal(payload.npx_command, `npx -y agent-capsule mcp "${resolve(capsule.file)}" --state-home`);
 
-      // mcp_servers_config
-      assert.deepEqual(payload.mcp_servers_config, {
-        hello: {
-          command: "npx",
-          args: ["-y", "agent-capsule", "mcp", resolve(capsule.file), "--state-home"],
-        },
-      });
+      // mcp_servers_config is a client config as pasted: the mcpServers wrapper is part of it
+      const serverConfig = {
+        command: "npx",
+        args: ["-y", "agent-capsule", "mcp", resolve(capsule.file), "--state-home"],
+      };
+      assert.deepEqual(payload.mcp_servers_config, { mcpServers: { hello: serverConfig } });
 
-      // Cursor deeplink
+      // Cursor deeplink: decoded the way Cursor documents it — name in the query, config is
+      // base64 of the server config JSON (https://cursor.com/docs/mcp/install-links).
       assert.ok(payload.cursor_deeplink.startsWith("cursor://anysphere.cursor-deeplink/mcp/install?"));
       const cursorUrl = new URL(payload.cursor_deeplink);
       assert.equal(cursorUrl.searchParams.get("name"), "hello");
-      const cursorConfig = JSON.parse(cursorUrl.searchParams.get("config") ?? "{}");
-      assert.deepEqual(cursorConfig, {
-        command: "npx",
-        args: ["-y", "agent-capsule", "mcp", resolve(capsule.file), "--state-home"],
-      });
+      const cursorBase64 = cursorUrl.searchParams.get("config") ?? "";
+      assert.deepEqual(JSON.parse(Buffer.from(cursorBase64, "base64").toString("utf8")), serverConfig);
+      // The base64 sits in the URL percent-encoded, so `+` and `/` cannot be re-read as a space
+      // or a path separator by a query parser.
+      const rawCursorConfig = payload.cursor_deeplink.split("&config=")[1] ?? "";
+      assert.ok(!/[+/]/.test(rawCursorConfig), `config param must be percent-encoded: ${rawCursorConfig}`);
 
-      // VS Code deeplink
+      // VS Code deeplink: the whole query is URL-encoded JSON carrying the name inside
+      // (https://code.visualstudio.com/api/extension-guides/ai/mcp#create-an-mcp-installation-url).
       assert.ok(payload.vscode_deeplink.startsWith("vscode:mcp/install?"));
-      const vscodeUrl = new URL(payload.vscode_deeplink);
-      assert.equal(vscodeUrl.searchParams.get("name"), "hello");
-      const vscodeConfig = JSON.parse(vscodeUrl.searchParams.get("config") ?? "{}");
-      assert.deepEqual(vscodeConfig, {
-        command: "npx",
-        args: ["-y", "agent-capsule", "mcp", resolve(capsule.file), "--state-home"],
-      });
+      const vscodeQuery = payload.vscode_deeplink.split("?")[1] ?? "";
+      assert.deepEqual(JSON.parse(decodeURIComponent(vscodeQuery)), { name: "hello", ...serverConfig });
     });
   });
 
@@ -107,6 +104,8 @@ describe("capsule share", () => {
       assert.ok(human.includes("VS Code:"));
       assert.ok(human.includes("Claude Code / Terminal:"));
       assert.ok(human.includes("Generic MCP Client"));
+      // The printed snippet is pasteable as-is, wrapper included
+      assert.ok(human.includes(`"mcpServers"`));
     });
   });
 

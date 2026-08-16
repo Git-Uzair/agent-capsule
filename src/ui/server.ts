@@ -1,6 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { claudeStoreConfigPath } from "../commands/inject.ts";
 import { buildSharePayload } from "../commands/share.ts";
 import { asRecord } from "../core/canonical.ts";
 import { CapsuleError } from "../core/errors.ts";
@@ -191,6 +193,17 @@ export function renderInstallerHtml(capsule: LoadedCapsule, token?: string): str
       : "None";
   const hasGuestUi = Boolean(manifest.ui?.local?.path ?? manifest.ui?.app?.path);
   const uiUrl = token ? `/?t=${encodeURIComponent(token)}` : "/";
+  // The page never writes a client config, so it names the file a human would edit instead — and
+  // names the Store overlay when that is the copy Claude Desktop actually reads (see inject.ts).
+  const classicClaudeConfig =
+    process.env.APPDATA === undefined
+      ? undefined
+      : join(process.env.APPDATA, "Claude", "claude_desktop_config.json");
+  const claudeConfigPath =
+    classicClaudeConfig === undefined
+      ? "claude_desktop_config.json"
+      : (claudeStoreConfigPath(classicClaudeConfig) ?? classicClaudeConfig);
+  const mcpServersJson = JSON.stringify(share.mcp_servers_config, null, 2);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -368,6 +381,9 @@ export function renderInstallerHtml(capsule: LoadedCapsule, token?: string): str
               ? `<p style="color:var(--text-muted);font-size:0.875rem">Double-click the .mcpb bundle on your machine:</p><pre><code>${escapeHtml(share.mcpb_file)}</code></pre>`
               : `<p style="color:var(--text-muted);font-size:0.875rem">Export as a double-clickable bundle using:</p><pre><code>capsule export-mcpb "${escapeHtml(share.file)}"</code></pre>`
           }
+          <p style="color:var(--text-muted);font-size:0.875rem">Or configure it by hand: this page writes nothing — paste the block below into <code>${escapeHtml(claudeConfigPath)}</code> yourself and restart Claude Desktop.</p>
+          <pre><code>${escapeHtml(mcpServersJson)}</code></pre>
+          <button class="btn btn-secondary copy-btn" data-snippet="${escapeHtml(mcpServersJson)}">Copy Claude Desktop JSON</button>
         </div>
 
         <div class="install-option">
@@ -405,7 +421,7 @@ export function renderInstallerHtml(capsule: LoadedCapsule, token?: string): str
             <span class="install-title">Generic MCP Client (mcpServers JSON)</span>
             <button class="btn btn-secondary copy-btn">Copy JSON</button>
           </div>
-          <pre><code>${escapeHtml(JSON.stringify(share.mcp_servers_config, null, 2))}</code></pre>
+          <pre><code>${escapeHtml(mcpServersJson)}</code></pre>
         </div>
       </div>
     </div>

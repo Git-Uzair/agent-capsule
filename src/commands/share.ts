@@ -23,7 +23,7 @@ export type SharePayload = {
   file: string;
   mcpb_file?: string;
   npx_command: string;
-  mcp_servers_config: Record<string, McpServerConfigItem>;
+  mcp_servers_config: { mcpServers: Record<string, McpServerConfigItem> };
   cursor_deeplink: string;
   vscode_deeplink: string;
 };
@@ -61,8 +61,14 @@ export function buildSharePayload(capsule: LoadedCapsule, filePath: string): Sha
     stateHome: true,
   });
 
-  const encodedConfig = encodeURIComponent(JSON.stringify(serverConfig));
-  const encodedName = encodeURIComponent(name);
+  // Each vendor decodes its own link its own way, so each is encoded its own way:
+  // Cursor reads `config` as base64 of the server-config JSON, with the server name in `name`
+  // (https://cursor.com/docs/mcp/install-links). The base64 is percent-encoded on top so that
+  // `+` and `/` survive a query parser that would otherwise read `+` as a space.
+  const cursorConfig = encodeURIComponent(Buffer.from(JSON.stringify(serverConfig), "utf8").toString("base64"));
+  // VS Code reads the *whole* query as URL-encoded JSON, name inside the object
+  // (https://code.visualstudio.com/api/extension-guides/ai/mcp#create-an-mcp-installation-url).
+  const vscodeQuery = encodeURIComponent(JSON.stringify({ name, ...serverConfig }));
 
   const payload: SharePayload = {
     capsuleId: capsule.capsuleId,
@@ -75,11 +81,12 @@ export function buildSharePayload(capsule: LoadedCapsule, filePath: string): Sha
     file: absPath,
     ...(mcpbFile !== undefined ? { mcpb_file: mcpbFile } : {}),
     npx_command: `npx -y agent-capsule mcp "${absPath}" --state-home`,
+    // Shaped as a client config file, not as a fragment: pasteable without editing.
     mcp_servers_config: {
-      [name]: serverConfig,
+      mcpServers: { [name]: serverConfig },
     },
-    cursor_deeplink: `cursor://anysphere.cursor-deeplink/mcp/install?name=${encodedName}&config=${encodedConfig}`,
-    vscode_deeplink: `vscode:mcp/install?name=${encodedName}&config=${encodedConfig}`,
+    cursor_deeplink: `cursor://anysphere.cursor-deeplink/mcp/install?name=${encodeURIComponent(name)}&config=${cursorConfig}`,
+    vscode_deeplink: `vscode:mcp/install?${vscodeQuery}`,
   };
 
   return payload;

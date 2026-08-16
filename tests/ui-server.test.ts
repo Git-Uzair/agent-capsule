@@ -598,6 +598,10 @@ test("a capsule with no local page serves the installer discovery page", async (
       assert.ok(res.body.includes("cursor://anysphere.cursor-deeplink/mcp/install?"));
       assert.ok(res.body.includes("vscode:mcp/install?"));
       assert.ok(res.body.includes("npx -y agent-capsule mcp"));
+      // The Claude Desktop section is honest about writing nothing and hands over a pasteable config.
+      assert.ok(res.body.includes("claude_desktop_config.json"));
+      assert.ok(res.body.includes("&quot;mcpServers&quot;"));
+      assert.ok(res.body.includes("Copy Claude Desktop JSON"));
       assert.ok(res.body.includes("Declared Capabilities"));
       assert.ok(res.body.includes("greet"));
       assert.ok(res.body.includes("copy-btn"));

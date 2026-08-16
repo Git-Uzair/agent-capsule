@@ -20,7 +20,7 @@ Agent Capsules support two primary distribution vehicles depending on target cli
 
 3. **Multi-Client Deep Links & npx One-Liners** (Cursor, VS Code, Claude Code, Windsurf):
    - Generated via `capsule share <file.capsule>`.
-   - Generates 1-click Cursor and VS Code deep links, `npx` execution commands, and standard `mcpServers` JSON blocks.
+   - Generates 1-click Cursor and VS Code deep links in each vendor's documented wire format (see §6), `npx` execution commands, and a pasteable `mcpServers` config block.
    - Double-clicking a bare `.capsule` file launches an authenticated loopback installer/discovery page (`capsule ui <file.capsule>`).
 
 ---
@@ -155,19 +155,35 @@ The `share` command generates sharing payloads and deep links for any client env
     "keyId": "sha256:...",
     "npx_command": "npx -y agent-capsule mcp \"/path/to/greeter.capsule\" --state-home",
     "mcp_servers_config": {
-      "greeter": {
-        "command": "npx",
-        "args": ["-y", "agent-capsule", "mcp", "/path/to/greeter.capsule", "--state-home"]
+      "mcpServers": {
+        "greeter": {
+          "command": "npx",
+          "args": ["-y", "agent-capsule", "mcp", "/path/to/greeter.capsule", "--state-home"]
+        }
       }
     },
-    "cursor_deeplink": "cursor://anysphere.cursor-deeplink/mcp/install?name=greeter&config=...",
-    "vscode_deeplink": "vscode:mcp/install?name=greeter&config=..."
+    "cursor_deeplink": "cursor://anysphere.cursor-deeplink/mcp/install?name=greeter&config=eyJjb21tYW5kIjoi...",
+    "vscode_deeplink": "vscode:mcp/install?%7B%22name%22%3A%22greeter%22%2C%22command%22%3A%22npx%22..."
   }
   ```
+
+  `mcp_servers_config` carries the `mcpServers` wrapper on purpose: it is a client config file as pasted, not a fragment to re-wrap.
+
+- **Deep link wire formats** (each vendor decodes its link its own way, so each is encoded its own way):
+
+  | Client | Wire format | How the client reads it |
+  | :--- | :--- | :--- |
+  | Cursor | `cursor://anysphere.cursor-deeplink/mcp/install?name=<name>&config=<base64 JSON>` | `name` is the server name; `config` is `JSON.stringify(serverConfig)` base64-encoded (`{"command":…,"args":[…]}` — no name, no `mcpServers` wrapper). Decode: `JSON.parse(atob(url.searchParams.get("config")))`. |
+  | VS Code | `vscode:mcp/install?<URL-encoded JSON>` | The **whole query** is `encodeURIComponent(JSON.stringify({ name, ...serverConfig }))` — the name lives *inside* the object and there is no `config` parameter. Decode: `JSON.parse(decodeURIComponent(link.split("?")[1]))`. |
+
+  Sources: [Cursor MCP install links](https://cursor.com/docs/mcp/install-links) and [VS Code — create an MCP installation URL](https://code.visualstudio.com/api/extension-guides/ai/mcp#create-an-mcp-installation-url).
+
+  The Cursor base64 is additionally percent-encoded in the URL. Standard base64 can contain `+` and `/`, and a query parser that treats `+` as a space would corrupt the payload; percent-encoding round-trips through `URLSearchParams` unchanged.
 
 - **Interactive Installer & Discovery Page:**
   - Running `capsule ui <file.capsule>` on a capsule without an embedded UI (or navigating to `/installer` on any capsule) serves a local, authenticated discovery page.
   - Displays cryptographic identity, publisher key fingerprint, TOFU trust state, declared capabilities, tool list with effects, and copyable client setup snippets.
+  - The page writes no client configuration. The Claude Desktop section points at the `.mcpb` bundle (or the `capsule export-mcpb` command that produces one), names the exact `claude_desktop_config.json` it would otherwise edit — the Store `LocalCache` overlay when that shadowing copy exists, per `claudeStoreConfigPath` — and offers the `mcpServers` block to paste there by hand.
   - Enforces strict Content Security Policy (`default-src 'none'`, hashed inline scripts, loopback host validation, and token authentication).
 
 ---
